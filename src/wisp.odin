@@ -1,6 +1,7 @@
 package main
 
 import "core:fmt"
+import "core:os"
 import "core:strconv"
 import "core:strings"
 
@@ -33,8 +34,7 @@ SymbolObject :: struct {
 ListObject :: struct {
 	header: Object,
 
-	// Lists are immutable Wisp values. This storage is built once and is not
-	// mutated by language operations.
+	// Lists are immutable Wisp values. This storage is built once and is not mutated by language operations.
 	items: [dynamic]Value,
 }
 
@@ -80,7 +80,7 @@ Opcode :: enum u8 {
 
 	CALL, // ABC: A=callee, B=argument count -> result replaces A; arguments start at A+1
 
-	NEW_VECTOR,  // ABx: A=dst, Bx=initial capacity
+	NEW_VECTOR,  // ABx: A=dst, Bx=initial capacity hint
 	VECTOR_PUSH, // ABC: A=vector, B=value -> A remains the vector
 	VECTOR_POP,  // ABC: A=dst, B=vector -> removed value goes to A
 	SET_VECTOR,  // ABC: A=vector, B=index, C=value -> expression result remains in C
@@ -101,28 +101,57 @@ InstABx :: bit_field u32 {
 	b:  u16    | 16,
 }
 
+// Finished executable chunk owning its bytecode and constants.
 Code :: struct {
 	bytecode:         [dynamic]u32,
 	constants:        [dynamic]Value,
 	frame_slot_count: int,
 }
 
+// Append-only globals keep stable indexes embedded in bytecode.
 GlobalBinding :: struct {
 	symbol:  ^SymbolObject,
 	value:   Value,
 	mutable: bool,
 }
 
+// Mutable one-code build state transferred by end_code.
 Active_Code: Code
 
+// One host-owned execution world; globals persist while slots reset per run.
 VM :: struct {
 	slots:        [dynamic]Value,
 	globals:      [dynamic]GlobalBinding,
+	// Current host-operation diagnostic; empty means no error.
 	error_string: string,
 }
 
-// Public VM operations select one disposable Wisp world at a time.
+// Compiler and runtime entry procs select the VM used by internal helpers.
 Active_VM: ^VM
+
+
+// Compiler data ==================================================================================
+
+MAX_FRAME_SLOTS :: int(max(u8)) + 1
+
+LocalBinding :: struct {
+	symbol: ^SymbolObject,
+	slot:   int,
+}
+
+// Visible binding entries occupy 0..<local_count; explicit slots may sit above
+// live outer expressions. next_slot is the first unreserved frame slot.
+Compiler := struct {
+	// A failed build is disposable; its diagnostic lives in Active_VM.error_string.
+	failed: bool,
+
+	local_bindings: [MAX_FRAME_SLOTS]LocalBinding,
+	local_count:    int,
+
+	// Begins duplicate-definition checks for the current lexical scope.
+	current_scope_local_start: int,
+	next_slot:                 int,
+}{}
 
 
 // Symbol interning ===============================================================================
@@ -175,19 +204,22 @@ new_vector_object :: proc(items: [dynamic]Value) -> ^VectorObject {
 
 // Reader state ===================================================================================
 
-// Reader is single-active; error_string latches failure until the next read_source.
+// Reader is single-active; failed latches until the next read_source.
 // Values returned after failure are disposable placeholders that callers ignore.
 Reader := struct {
 	source: string,
 	index: int,
-	error_string: string,
+	failed: bool,
 }{}
 
 
 // Reader errors ==================================================================================
 
 reader_error :: proc(message: string) {
-	Reader.error_string = fmt.tprintf("read error at byte %d: %s", Reader.index, message)
+	if Reader.failed { return }
+
+	Reader.failed = true
+	Active_VM.error_string = fmt.tprintf("read error at byte %d: %s", Reader.index, message)
 }
 
 
@@ -334,7 +366,6 @@ read_atom :: proc() -> Value {
 }
 
 read_string :: proc() -> Value {
-	// current char is '"'
 	Reader.index += 1
 	start := Reader.index
 
@@ -365,7 +396,6 @@ read_string :: proc() -> Value {
 }
 
 read_list :: proc() -> Value {
-	// current char is '('
 	Reader.index += 1
 
 	// Build locally; the ListObject takes ownership only after the closing ')'.
@@ -386,7 +416,7 @@ read_list :: proc() -> Value {
 		}
 
 		item := read_form()
-		if Reader.error_string != "" {
+		if Reader.failed {
 			delete(items)
 			return Value{}
 		}
@@ -396,7 +426,6 @@ read_list :: proc() -> Value {
 }
 
 read_vector :: proc() -> Value {
-	// current char is '['
 	Reader.index += 1
 
 	// Build locally; the VectorObject takes ownership only after the closing ']'.
@@ -417,7 +446,7 @@ read_vector :: proc() -> Value {
 		}
 
 		item := read_form()
-		if Reader.error_string != "" {
+		if Reader.failed {
 			delete(items)
 			return Value{}
 		}
@@ -469,7 +498,7 @@ read_all_forms :: proc() -> [dynamic]Value {
 		}
 
 		form := read_form()
-		if Reader.error_string != "" {
+		if Reader.failed {
 			return forms
 		}
 
@@ -479,19 +508,18 @@ read_all_forms :: proc() -> [dynamic]Value {
 	return forms
 }
 
-read_source :: proc(source: string) -> ([dynamic]Value, string) {
-	// Reset the singleton reader for one complete source operation.
+read_source :: proc(source: string) -> [dynamic]Value {
 	Reader.source = source
 	Reader.index = 0
-	Reader.error_string = ""
+	Reader.failed = false
 
 	forms := read_all_forms()
-	if Reader.error_string != "" {
+	if Reader.failed {
 		delete(forms)
-		return nil, Reader.error_string
+		return nil
 	}
 
-	return forms, ""
+	return forms
 }
 
 
@@ -747,18 +775,6 @@ const_value :: proc(value: Value) -> int {
 	return len(Active_Code.constants) - 1
 }
 
-const_int :: proc(value: i64) -> int {
-	return const_value(Value(value))
-}
-
-const_float :: proc(value: f64) -> int {
-	return const_value(Value(value))
-}
-
-const_string :: proc(text: string) -> int {
-	return const_value(Value(cast(^Object)new_string_object(text)))
-}
-
 
 // Bytecode emission ==============================================================================
 
@@ -882,7 +898,562 @@ emit_return :: proc(src: int) {
 }
 
 
+// Compiler =======================================================================================
+
+compile_error :: proc(message: string) {
+	if Compiler.failed { return }
+
+	Compiler.failed = true
+	Active_VM.error_string = fmt.tprintf("compile error: %s", message)
+}
+
+// Claims one frame slot above every value and binding that is currently live.
+claim_slot :: proc() -> int {
+	if Compiler.next_slot >= MAX_FRAME_SLOTS {
+		compile_error("code uses too many frame slots")
+		return 0
+	}
+
+	slot := Compiler.next_slot
+	Compiler.next_slot += 1
+	return slot
+}
+
+// Reserves a contiguous slot range ending immediately before slot_after_last.
+reserve_slots_until :: proc(slot_after_last: int) {
+	if slot_after_last > MAX_FRAME_SLOTS {
+		compile_error("code uses too many frame slots")
+		return
+	}
+
+	if Compiler.next_slot < slot_after_last {
+		Compiler.next_slot = slot_after_last
+	}
+}
+
+// Searches visible bindings from newest to oldest.
+find_local :: proc(symbol: ^SymbolObject) -> (int, bool) {
+	for i := Compiler.local_count - 1; i >= 0; i -= 1 {
+		if Compiler.local_bindings[i].symbol == symbol {
+			return Compiler.local_bindings[i].slot, true
+		}
+	}
+
+	return -1, false
+}
+
+form_is_definition :: proc(value: Value) -> bool {
+	object, is_object := value.(^Object)
+	if !is_object || object.kind != .LIST {
+		return false
+	}
+
+	list := cast(^ListObject)object
+	if len(list.items) == 0 {
+		return false
+	}
+
+	head, head_is_object := list.items[0].(^Object)
+	if !head_is_object || head.kind != .SYMBOL {
+		return false
+	}
+
+	return (cast(^SymbolObject)head).text == "def"
+}
+
+compile_constant :: proc(value: Value, dst: int) {
+	if len(Active_Code.constants) > int(max(u16)) {
+		compile_error("code uses too many constants")
+		return
+	}
+
+	constant_index := const_value(value)
+	emit_load_const(dst, constant_index)
+}
+
+compile_name_expr :: proc(symbol: ^SymbolObject, dst: int) {
+	local_slot, local_found := find_local(symbol)
+	if local_found {
+		emit_move(dst, local_slot)
+		return
+	}
+
+	global_index, global_found := find_global(Active_VM, symbol)
+	if global_found {
+		if global_index > int(max(u16)) {
+			compile_error("global binding index does not fit bytecode")
+			return
+		}
+
+		emit_get_global(dst, global_index)
+		return
+	}
+
+	compile_error(fmt.tprintf("undefined name `%s`", symbol.text))
+}
+
+compile_vector_expr :: proc(vector: ^VectorObject, dst: int) {
+	// Pushes determine length; this only avoids backing-storage growth.
+	capacity_hint := len(vector.items)
+	if capacity_hint > int(max(u16)) {
+		capacity_hint = int(max(u16))
+	}
+
+	emit_new_vector(dst, capacity_hint)
+
+	if len(vector.items) == 0 {
+		return
+	}
+
+	item_slot := claim_slot()
+	if Compiler.failed { return }
+
+	for item in vector.items {
+		compile_expr(item, item_slot)
+		if Compiler.failed { return }
+
+		emit_vector_push(dst, item_slot)
+	}
+}
+
+compile_def :: proc(form: Value) {
+	object, is_object := form.(^Object)
+	assert(is_object && object.kind == .LIST, "compile_def expected list form")
+
+	list := cast(^ListObject)object
+	if len(list.items) != 3 {
+		compile_error("`def` expects a name and value")
+		return
+	}
+
+	name_object, name_is_object := list.items[1].(^Object)
+	if !name_is_object || name_object.kind != .SYMBOL {
+		compile_error("`def` name must be a name")
+		return
+	}
+
+	name := cast(^SymbolObject)name_object
+	if name.text == "def" ||
+	   name.text == "set" ||
+	   name.text == "do" ||
+	   name.text == "if" ||
+	   name.text == "while" ||
+	   name.text == "fn" {
+		compile_error(fmt.tprintf("cannot define reserved name `%s`", name.text))
+		return
+	}
+
+	for i := Compiler.current_scope_local_start; i < Compiler.local_count; i += 1 {
+		if Compiler.local_bindings[i].symbol == name {
+			compile_error(fmt.tprintf("duplicate definition `%s` in the same scope", name.text))
+			return
+		}
+	}
+
+	binding_slot := claim_slot()
+	if Compiler.failed { return }
+
+	// The binding becomes visible only after its value has been compiled.
+	compile_expr(list.items[2], binding_slot)
+	if Compiler.failed { return }
+
+	Compiler.local_bindings[Compiler.local_count] = LocalBinding{
+		symbol = name,
+		slot   = binding_slot,
+	}
+	Compiler.local_count += 1
+}
+
+// Definitions persist through the body; the final form supplies dst.
+// Empty bodies produce nil, and non-final expression results are discarded.
+compile_body :: proc(forms: []Value, dst: int) {
+	if len(forms) == 0 {
+		emit_load_nil(dst)
+		return
+	}
+
+	for i := 0; i < len(forms); i += 1 {
+		form := forms[i]
+		is_last := i + 1 == len(forms)
+
+		if form_is_definition(form) {
+			if is_last {
+				compile_error("body cannot end with a definition")
+				return
+			}
+
+			compile_def(form)
+			if Compiler.failed { return }
+			continue
+		}
+
+		if is_last {
+			compile_expr(form, dst)
+			return
+		}
+
+		slot_mark := Compiler.next_slot
+		discard_slot := claim_slot()
+		if Compiler.failed { return }
+
+		compile_expr(form, discard_slot)
+		if Compiler.failed { return }
+
+		Compiler.next_slot = slot_mark
+	}
+}
+
+compile_do :: proc(list: ^ListObject, dst: int) {
+	local_mark := Compiler.local_count
+	slot_mark := Compiler.next_slot
+	outer_scope_start := Compiler.current_scope_local_start
+
+	Compiler.current_scope_local_start = local_mark
+	compile_body(list.items[1:], dst)
+
+	Compiler.local_count = local_mark
+	Compiler.next_slot = slot_mark
+	Compiler.current_scope_local_start = outer_scope_start
+}
+
+compile_set :: proc(list: ^ListObject, dst: int) {
+	if len(list.items) != 3 {
+		compile_error("`set` expects a target and value")
+		return
+	}
+
+	target := list.items[1]
+	value := list.items[2]
+
+	target_object, target_is_object := target.(^Object)
+	if !target_is_object {
+		compile_error("invalid `set` target")
+		return
+	}
+
+	if target_object.kind == .SYMBOL {
+		symbol := cast(^SymbolObject)target_object
+
+		binding_slot, local_found := find_local(symbol)
+		if local_found {
+			// Visible binding slots are not general expression destinations.
+			// Compile the complete RHS into dst before updating the binding.
+			compile_expr(value, dst)
+			if Compiler.failed { return }
+
+			emit_move(binding_slot, dst)
+			return
+		}
+
+		global_index, global_found := find_global(Active_VM, symbol)
+		if global_found {
+			if !Active_VM.globals[global_index].mutable {
+				compile_error(fmt.tprintf("cannot set immutable binding `%s`", symbol.text))
+				return
+			}
+
+			compile_error("setting mutable global bindings is not implemented")
+			return
+		}
+
+		compile_error(fmt.tprintf("cannot set undefined binding `%s`", symbol.text))
+		return
+	}
+
+	if target_object.kind == .LIST {
+		target_list := cast(^ListObject)target_object
+		if len(target_list.items) != 2 {
+			compile_error("indexed `set` target expects a receiver and index")
+			return
+		}
+
+		receiver_slot := claim_slot()
+		index_slot := claim_slot()
+		if Compiler.failed { return }
+
+		compile_expr(target_list.items[0], receiver_slot)
+		if Compiler.failed { return }
+
+		compile_expr(target_list.items[1], index_slot)
+		if Compiler.failed { return }
+
+		compile_expr(value, dst)
+		if Compiler.failed { return }
+
+		emit_set_vector(receiver_slot, index_slot, dst)
+		return
+	}
+
+	compile_error("invalid `set` target")
+}
+
+compile_ordinary_call :: proc(list: ^ListObject, dst: int) {
+	argument_count := len(list.items) - 1
+	if argument_count > int(max(u8)) {
+		compile_error("call has too many arguments")
+		return
+	}
+
+	// CALL needs a contiguous callee/result and argument window above live slots.
+	base := Compiler.next_slot
+	reserve_slots_until(base + argument_count + 1)
+	if Compiler.failed { return }
+
+	compile_expr(list.items[0], base)
+	if Compiler.failed { return }
+
+	for i := 0; i < argument_count; i += 1 {
+		compile_expr(list.items[i + 1], base + 1 + i)
+		if Compiler.failed { return }
+	}
+
+	emit_call(base, argument_count)
+	emit_move(dst, base)
+}
+
+compile_core_operation :: proc(symbol: ^SymbolObject, args: []Value, dst: int) {
+	if symbol.text == "+" ||
+	   symbol.text == "-" ||
+	   symbol.text == "*" ||
+	   symbol.text == "/" {
+		operand_count := len(args)
+		if operand_count < 2 {
+			compile_error(fmt.tprintf("`%s` expects two or more operands", symbol.text))
+			return
+		}
+		if operand_count > int(max(u8)) {
+			compile_error(fmt.tprintf("`%s` has too many operands", symbol.text))
+			return
+		}
+
+		operand_base := Compiler.next_slot
+		reserve_slots_until(operand_base + operand_count)
+		if Compiler.failed { return }
+
+		for i := 0; i < operand_count; i += 1 {
+			compile_expr(args[i], operand_base + i)
+			if Compiler.failed { return }
+		}
+
+		if symbol.text == "+" {
+			emit_add(dst, operand_base, operand_count)
+		} else if symbol.text == "-" {
+			emit_sub(dst, operand_base, operand_count)
+		} else if symbol.text == "*" {
+			emit_mul(dst, operand_base, operand_count)
+		} else {
+			emit_div(dst, operand_base, operand_count)
+		}
+		return
+	}
+
+	if symbol.text == "push" {
+		if len(args) != 2 {
+			compile_error("`push` expects two operands")
+			return
+		}
+
+		value_slot := claim_slot()
+		if Compiler.failed { return }
+
+		compile_expr(args[0], dst)
+		if Compiler.failed { return }
+
+		compile_expr(args[1], value_slot)
+		if Compiler.failed { return }
+
+		emit_vector_push(dst, value_slot)
+		return
+	}
+
+	if symbol.text == "pop" {
+		if len(args) != 1 {
+			compile_error("`pop` expects one operand")
+			return
+		}
+
+		compile_expr(args[0], dst)
+		if Compiler.failed { return }
+
+		emit_vector_pop(dst, dst)
+		return
+	}
+
+	assert(false, "compile_core_operation expected core operation name")
+}
+
+// Bare heads resolve as special forms, visible bindings, then core operations.
+// Non-symbol heads are ordinary calls.
+compile_list_expr :: proc(list: ^ListObject, dst: int) {
+	if len(list.items) == 0 {
+		compile_error("empty list is not an expression")
+		return
+	}
+
+	head_object, head_is_object := list.items[0].(^Object)
+	if !head_is_object || head_object.kind != .SYMBOL {
+		compile_ordinary_call(list, dst)
+		return
+	}
+
+	head := cast(^SymbolObject)head_object
+
+	if head.text == "def" {
+		compile_error("`def` is not valid in expression position")
+		return
+	}
+	if head.text == "set" {
+		compile_set(list, dst)
+		return
+	}
+	if head.text == "do" {
+		compile_do(list, dst)
+		return
+	}
+	if head.text == "if" ||
+	   head.text == "while" ||
+	   head.text == "fn" {
+		compile_error(fmt.tprintf("`%s` is not implemented", head.text))
+		return
+	}
+
+	_, local_found := find_local(head)
+	if local_found {
+		compile_ordinary_call(list, dst)
+		return
+	}
+
+	_, global_found := find_global(Active_VM, head)
+	if global_found {
+		compile_ordinary_call(list, dst)
+		return
+	}
+
+	if head.text == "+" ||
+	   head.text == "-" ||
+	   head.text == "*" ||
+	   head.text == "/" ||
+	   head.text == "push" ||
+	   head.text == "pop" {
+		compile_core_operation(head, list.items[1:], dst)
+		return
+	}
+
+	compile_error(fmt.tprintf("undefined name `%s`", head.text))
+}
+
+// The caller reserves dst. Expression compilation may use higher scratch slots
+// but restores the live slot boundary it received.
+compile_expr :: proc(value: Value, dst: int) {
+	slot_mark := Compiler.next_slot
+
+	if value == nil {
+		emit_load_nil(dst)
+		Compiler.next_slot = slot_mark
+		return
+	}
+
+	switch v in value {
+	case bool:
+		if v {
+			emit_load_true(dst)
+		} else {
+			emit_load_false(dst)
+		}
+
+	case i64, f64:
+		compile_constant(value, dst)
+
+	case ^Object:
+		switch v.kind {
+		case .STRING:
+			compile_constant(value, dst)
+
+		case .SYMBOL:
+			compile_name_expr(cast(^SymbolObject)v, dst)
+
+		case .LIST:
+			compile_list_expr(cast(^ListObject)v, dst)
+
+		case .VECTOR:
+			compile_vector_expr(cast(^VectorObject)v, dst)
+
+		case .NATIVE_FUNCTION:
+			compile_error("native function object cannot appear in source")
+		}
+	}
+
+	Compiler.next_slot = slot_mark
+}
+
+// Returns the final expression, or nil when empty or ending in a definition.
+// Non-final expression results are discarded.
+compile_file_forms :: proc(forms: []Value) -> int {
+	if len(forms) == 0 {
+		result_slot := claim_slot()
+		if Compiler.failed { return 0 }
+
+		emit_load_nil(result_slot)
+		return result_slot
+	}
+
+	result_slot := 0
+
+	for i := 0; i < len(forms); i += 1 {
+		form := forms[i]
+		is_last := i + 1 == len(forms)
+
+		if form_is_definition(form) {
+			compile_def(form)
+			if Compiler.failed { return 0 }
+
+			if is_last {
+				result_slot = claim_slot()
+				if Compiler.failed { return 0 }
+				emit_load_nil(result_slot)
+			}
+			continue
+		}
+
+		slot_mark := Compiler.next_slot
+		result_slot = claim_slot()
+		if Compiler.failed { return 0 }
+
+		compile_expr(form, result_slot)
+		if Compiler.failed { return 0 }
+
+		if !is_last {
+			Compiler.next_slot = slot_mark
+		}
+	}
+
+	return result_slot
+}
+
+compile_forms :: proc(forms: [dynamic]Value) -> Code {
+	Compiler.failed = false
+	Compiler.local_count = 0
+	Compiler.current_scope_local_start = 0
+	Compiler.next_slot = 0
+
+	begin_code()
+
+	return_slot := compile_file_forms(forms[:])
+	if Compiler.failed {
+		delete(Active_Code.bytecode)
+		delete(Active_Code.constants)
+		Active_Code = Code{}
+		return Code{}
+	}
+
+	emit_return(return_slot)
+	return end_code()
+}
+
+
 // Core operations ================================================================================
+
+// +, -, and * stay int while all operands are ints; / always returns float.
 
 core_add :: proc(args: []Value) -> Value {
 	if len(args) < 2 {
@@ -1074,12 +1645,12 @@ native_print :: proc(vm: ^VM, args: []Value) -> Value {
 
 // VM execution ===================================================================================
 
-run_code :: proc(vm: ^VM, code: ^Code) -> (Value, string) {
-	Active_VM = vm
+run_code :: proc(code: ^Code) -> Value {
+	vm := Active_VM
 
+	// Allocate the exact entry slot window recorded during emission.
 	delete(vm.slots)
 	vm.slots = make([dynamic]Value, code.frame_slot_count)
-	vm.error_string = ""
 
 	ip := 0
 
@@ -1140,7 +1711,7 @@ run_code :: proc(vm: ^VM, code: ^Code) -> (Value, string) {
 			}
 
 			if vm.error_string != "" {
-				return Value{}, vm.error_string
+				return Value{}
 			}
 			vm.slots[dst] = result
 
@@ -1153,7 +1724,7 @@ run_code :: proc(vm: ^VM, code: ^Code) -> (Value, string) {
 			callee_object, callee_is_object := callee.(^Object)
 			if !callee_is_object {
 				runtime_error("value is not callable")
-				return Value{}, vm.error_string
+				return Value{}
 			}
 
 			args := vm.slots[base + 1:base + 1 + argument_count]
@@ -1164,7 +1735,7 @@ run_code :: proc(vm: ^VM, code: ^Code) -> (Value, string) {
 
 				result := function.native(vm, args)
 				if vm.error_string != "" {
-					return Value{}, vm.error_string
+					return Value{}
 				}
 
 				vm.slots[base] = result
@@ -1172,26 +1743,26 @@ run_code :: proc(vm: ^VM, code: ^Code) -> (Value, string) {
 			case .VECTOR:
 				if argument_count != 1 {
 					runtime_error("vector call expects one index")
-					return Value{}, vm.error_string
+					return Value{}
 				}
 
 				index, index_is_int := vm.slots[base + 1].(i64)
 				if !index_is_int {
 					runtime_error("vector index must be int")
-					return Value{}, vm.error_string
+					return Value{}
 				}
 
 				vector := cast(^VectorObject)callee_object
 				if index < 0 || index >= i64(len(vector.items)) {
 					runtime_error("vector index out of range")
-					return Value{}, vm.error_string
+					return Value{}
 				}
 
 				vm.slots[base] = vector.items[int(index)]
 
 			case .STRING, .SYMBOL, .LIST:
 				runtime_error("value is not callable")
-				return Value{}, vm.error_string
+				return Value{}
 			}
 
 		case .NEW_VECTOR:
@@ -1213,7 +1784,7 @@ run_code :: proc(vm: ^VM, code: ^Code) -> (Value, string) {
 			vector_object, vector_is_object := vector_value.(^Object)
 			if !vector_is_object || vector_object.kind != .VECTOR {
 				runtime_error("vector push receiver must be vector")
-				return Value{}, vm.error_string
+				return Value{}
 			}
 
 			vector := cast(^VectorObject)vector_object
@@ -1226,13 +1797,13 @@ run_code :: proc(vm: ^VM, code: ^Code) -> (Value, string) {
 			vector_object, vector_is_object := vector_value.(^Object)
 			if !vector_is_object || vector_object.kind != .VECTOR {
 				runtime_error("vector pop receiver must be vector")
-				return Value{}, vm.error_string
+				return Value{}
 			}
 
 			vector := cast(^VectorObject)vector_object
 			if len(vector.items) == 0 {
 				runtime_error("cannot pop empty vector")
-				return Value{}, vm.error_string
+				return Value{}
 			}
 
 			vm.slots[int(inst.a)] = pop(&vector.items)
@@ -1246,26 +1817,26 @@ run_code :: proc(vm: ^VM, code: ^Code) -> (Value, string) {
 			vector_object, vector_is_object := vector_value.(^Object)
 			if !vector_is_object || vector_object.kind != .VECTOR {
 				runtime_error("vector set receiver must be vector")
-				return Value{}, vm.error_string
+				return Value{}
 			}
 
 			index, index_is_int := index_value.(i64)
 			if !index_is_int {
 				runtime_error("vector set index must be int")
-				return Value{}, vm.error_string
+				return Value{}
 			}
 
 			vector := cast(^VectorObject)vector_object
 			if index < 0 || index >= i64(len(vector.items)) {
 				runtime_error("vector index out of range")
-				return Value{}, vm.error_string
+				return Value{}
 			}
 
 			vector.items[int(index)] = new_value
 
 		case .RETURN:
 			inst := InstABx(word)
-			return vm.slots[int(inst.a)], ""
+			return vm.slots[int(inst.a)]
 
 		case:
 			assert(false, "invalid opcode")
@@ -1274,3 +1845,31 @@ run_code :: proc(vm: ^VM, code: ^Code) -> (Value, string) {
 }
 
 
+// Host operations ===============================================================================
+
+run_string :: proc(vm: ^VM, source: string) -> Value {
+	Active_VM = vm
+	vm.error_string = ""
+
+	forms := read_source(source)
+	if Reader.failed { return Value{} }
+
+	code := compile_forms(forms)
+	if Compiler.failed { return Value{} }
+
+	return run_code(&code)
+}
+
+run_file :: proc(vm: ^VM, path: string) -> Value {
+	Active_VM = vm
+	vm.error_string = ""
+
+	source_bytes, read_error := os.read_entire_file(path, context.allocator)
+	if read_error != nil {
+		vm.error_string = fmt.tprintf("read error: could not read file `%s`", path)
+		return Value{}
+	}
+	defer delete(source_bytes)
+
+	return run_string(vm, string(source_bytes))
+}
