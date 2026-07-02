@@ -5,7 +5,7 @@ A nimble, dynamic, embeddable Lisp, written in Odin.
 ```wisp
 (def lang "Wisp")
 (def (greet name)
-  (print "Hi" name "!")
+  (print "Hi" name "!"))
   
 (greet lang)
 ```
