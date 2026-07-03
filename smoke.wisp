@@ -24,11 +24,19 @@
 
 (print [nil true false 2.5])
 (print (/ 20 2 5))
+(print [(% -1 8) (= 1 1.0) (< 1 2) (>= 2 2)])
+(print [(not nil) (not false) (not 0)])
+(print [(len values) (len "wisp")])
 
 (print [ + - / * ])
 
 (def add +)
 (print (add 400 20))
+
+(print "hello" 420 60. [nil true])
+(write "hello" 420 60. [nil true])
+(write "write")
+(print " works")
 
 (output "done")
 values

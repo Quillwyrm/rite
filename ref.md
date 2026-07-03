@@ -1069,9 +1069,10 @@ An implementation may use dedicated bytecode for a direct call to a known suppli
 (- a b ...)
 (* a b ...)
 (/ a b ...)
+(% a b)
 ```
 
-Arithmetic operations accept two or more numbers.
+`+`, `-`, `*`, and `/` accept two or more numbers.
 
 They reduce left-to-right.
 
@@ -1088,6 +1089,26 @@ They reduce left-to-right.
 (/ 20 2 5)
 ; 2.0
 ```
+
+`%` accepts exactly two numbers and computes floor-style modulo.
+
+```scheme
+(% 13 4)
+; 1
+
+(% -13 4)
+; 3
+
+(% 13 -4)
+; -3
+
+(% -1 8)
+; 7
+```
+
+Int modulo returns an int. If either argument is a float, modulo returns a float.
+
+Modulo by zero is an error.
 
 Zero-argument arithmetic is an error.
 
@@ -1234,6 +1255,8 @@ different non-numeric kinds are unequal.
 
 Numeric equality treats equal int and float values as equal.
 
+Mixed numeric equality compares exact numeric values without first rounding the int to a float.
+
 ```scheme
 (= 1 1.0)
 ; true
@@ -1252,6 +1275,8 @@ Ordering comparisons accept two numbers and return a bool.
 
 Mixed int/float comparison is allowed.
 
+Mixed numeric ordering compares exact numeric values without first rounding the int to a float.
+
 Non-number operands are an error.
 
 ```scheme
@@ -1268,17 +1293,26 @@ Non-number operands are an error.
 ### Output
 
 ```scheme
-(print value)
+(print value...)
+(write value...)
 ```
 
-`print` writes the display representation of `value` followed by a newline and returns `nil`.
+`print` writes each display value separated by spaces, writes a final newline, and returns `nil`.
+
+With no arguments, `print` writes a newline.
+
+`write` writes each display value without separators or a final newline and returns `nil`.
 
 Strings print without quotes.
 
 ```scheme
-(print "hello")
+(print "hello" 10)
 ; prints:
-; hello
+; hello 10
+
+(write "x=" 10)
+; prints:
+; x=10
 ```
 
 Function values print as opaque function values.

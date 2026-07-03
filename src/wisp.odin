@@ -1,6 +1,7 @@
 package main
 
 import "core:fmt"
+import "core:math"
 import "core:os"
 import "core:strconv"
 import "core:strings"
@@ -51,6 +52,13 @@ Value :: union {
 	^Object,
 }
 
+NumberOrder :: enum {
+	LESS,
+	EQUAL,
+	GREATER,
+	UNORDERED,
+}
+
 // args borrows a contiguous VM slot range for the duration of the call.
 // Native procs must not retain the slice.
 NativeProc :: proc(vm: ^VM, args: []Value) -> Value
@@ -77,6 +85,15 @@ Opcode :: enum u8 {
 	SUB, // ABC: A=dst, B=first operand, C=operand count
 	MUL, // ABC: A=dst, B=first operand, C=operand count
 	DIV, // ABC: A=dst, B=first operand, C=operand count
+
+	MOD,           // ABC: A=dst, B=lhs, C=rhs
+	EQUAL,         // ABC: A=dst, B=lhs, C=rhs
+	LESS,          // ABC: A=dst, B=lhs, C=rhs
+	LESS_EQUAL,    // ABC: A=dst, B=lhs, C=rhs
+	GREATER,       // ABC: A=dst, B=lhs, C=rhs
+	GREATER_EQUAL, // ABC: A=dst, B=lhs, C=rhs
+	NOT,           // ABC: A=dst, B=src
+	LEN,           // ABC: A=dst, B=src
 
 	CALL, // ABC: A=callee, B=argument count -> result replaces A; arguments start at A+1
 
@@ -888,6 +905,46 @@ emit_div :: proc(dst, first_slot, count: int) {
 	emit_ABC(.DIV, dst, first_slot, count)
 }
 
+emit_mod :: proc(dst, lhs, rhs: int) {
+	record_slots(dst, lhs, rhs)
+	emit_ABC(.MOD, dst, lhs, rhs)
+}
+
+emit_equal :: proc(dst, lhs, rhs: int) {
+	record_slots(dst, lhs, rhs)
+	emit_ABC(.EQUAL, dst, lhs, rhs)
+}
+
+emit_less :: proc(dst, lhs, rhs: int) {
+	record_slots(dst, lhs, rhs)
+	emit_ABC(.LESS, dst, lhs, rhs)
+}
+
+emit_less_equal :: proc(dst, lhs, rhs: int) {
+	record_slots(dst, lhs, rhs)
+	emit_ABC(.LESS_EQUAL, dst, lhs, rhs)
+}
+
+emit_greater :: proc(dst, lhs, rhs: int) {
+	record_slots(dst, lhs, rhs)
+	emit_ABC(.GREATER, dst, lhs, rhs)
+}
+
+emit_greater_equal :: proc(dst, lhs, rhs: int) {
+	record_slots(dst, lhs, rhs)
+	emit_ABC(.GREATER_EQUAL, dst, lhs, rhs)
+}
+
+emit_not :: proc(dst, src: int) {
+	record_slots(dst, src)
+	emit_ABC(.NOT, dst, src, 0)
+}
+
+emit_len :: proc(dst, src: int) {
+	record_slots(dst, src)
+	emit_ABC(.LEN, dst, src, 0)
+}
+
 emit_call :: proc(base, argument_count: int) {
 	assert(argument_count >= 0 && argument_count <= int(max(u8)), "call argument count does not fit u8")
 
@@ -1268,6 +1325,55 @@ compile_builtin_opcode :: proc(symbol: ^SymbolObject, args: []Value, dst: int) {
 		return
 	}
 
+	if symbol.text == "%" ||
+	   symbol.text == "=" ||
+	   symbol.text == "<" ||
+	   symbol.text == "<=" ||
+	   symbol.text == ">" ||
+	   symbol.text == ">=" {
+		assert(len(args) == 2, "binary builtin opcode requires two arguments")
+
+		operand_base := Compiler.next_slot
+		reserve_slots_until(operand_base + 2)
+		if Compiler.failed { return }
+
+		compile_expr(args[0], operand_base)
+		if Compiler.failed { return }
+
+		compile_expr(args[1], operand_base + 1)
+		if Compiler.failed { return }
+
+		if symbol.text == "%" {
+			emit_mod(dst, operand_base, operand_base + 1)
+		} else if symbol.text == "=" {
+			emit_equal(dst, operand_base, operand_base + 1)
+		} else if symbol.text == "<" {
+			emit_less(dst, operand_base, operand_base + 1)
+		} else if symbol.text == "<=" {
+			emit_less_equal(dst, operand_base, operand_base + 1)
+		} else if symbol.text == ">" {
+			emit_greater(dst, operand_base, operand_base + 1)
+		} else {
+			emit_greater_equal(dst, operand_base, operand_base + 1)
+		}
+		return
+	}
+
+	if symbol.text == "not" ||
+	   symbol.text == "len" {
+		assert(len(args) == 1, "unary builtin opcode requires one argument")
+
+		compile_expr(args[0], dst)
+		if Compiler.failed { return }
+
+		if symbol.text == "not" {
+			emit_not(dst, dst)
+		} else {
+			emit_len(dst, dst)
+		}
+		return
+	}
+
 	if symbol.text == "push" {
 		assert(len(args) >= 2, "push opcode requires a vector and at least one value")
 		if len(args) > int(max(u8)) {
@@ -1357,6 +1463,24 @@ compile_list_expr :: proc(list: ^ListObject, dst: int) {
 		   head.text == "-" ||
 		   head.text == "*" ||
 		   head.text == "/" {
+			compile_builtin_opcode(head, list.items[1:], dst)
+			return
+		}
+
+		if (head.text == "%" ||
+		    head.text == "=" ||
+		    head.text == "<" ||
+		    head.text == "<=" ||
+		    head.text == ">" ||
+		    head.text == ">=") &&
+		   argument_count == 2 {
+			compile_builtin_opcode(head, list.items[1:], dst)
+			return
+		}
+
+		if (head.text == "not" ||
+		    head.text == "len") &&
+		   argument_count == 1 {
 			compile_builtin_opcode(head, list.items[1:], dst)
 			return
 		}
@@ -1675,6 +1799,193 @@ core_div :: proc(args: []Value) -> Value {
 	return Value(float_result)
 }
 
+compare_int_float :: proc(integer: i64, number: f64) -> NumberOrder {
+	if number != number { return .UNORDERED }
+
+	lower_bound := f64(min(i64))
+	upper_bound := -lower_bound
+
+	if number < lower_bound { return .GREATER }
+	if number >= upper_bound { return .LESS }
+
+	truncated := i64(number)
+	if integer < truncated { return .LESS }
+	if integer > truncated { return .GREATER }
+
+	integer_float := f64(integer)
+	if integer_float < number { return .LESS }
+	if integer_float > number { return .GREATER }
+	return .EQUAL
+}
+
+// Compares numeric values without first rounding an int to f64.
+compare_numbers :: proc(lhs, rhs: Value) -> (NumberOrder, bool) {
+	#partial switch left in lhs {
+	case i64:
+		#partial switch right in rhs {
+		case i64:
+			if left < right { return .LESS, true }
+			if left > right { return .GREATER, true }
+			return .EQUAL, true
+
+		case f64:
+			return compare_int_float(left, right), true
+		}
+
+	case f64:
+		#partial switch right in rhs {
+		case i64:
+			order := compare_int_float(right, left)
+			if order == .LESS { return .GREATER, true }
+			if order == .GREATER { return .LESS, true }
+			return order, true
+
+		case f64:
+			if left < right { return .LESS, true }
+			if left > right { return .GREATER, true }
+			if left == right { return .EQUAL, true }
+			return .UNORDERED, true
+		}
+	}
+
+	return .UNORDERED, false
+}
+
+core_mod :: proc(lhs, rhs: Value) -> Value {
+	left_int, left_is_int := lhs.(i64)
+	right_int, right_is_int := rhs.(i64)
+
+	if left_is_int && right_is_int {
+		if right_int == 0 {
+			runtime_error("% divisor cannot be zero")
+			return Value{}
+		}
+		// The mathematical result is zero; direct signed division cannot represent the quotient.
+		if left_int == min(i64) && right_int == -1 {
+			return Value(i64(0))
+		}
+		return Value(left_int %% right_int)
+	}
+
+	left_float, left_is_float := lhs.(f64)
+	if left_is_int {
+		left_float = f64(left_int)
+	} else if !left_is_float {
+		runtime_error("% expects numbers")
+		return Value{}
+	}
+
+	right_float, right_is_float := rhs.(f64)
+	if right_is_int {
+		right_float = f64(right_int)
+	} else if !right_is_float {
+		runtime_error("% expects numbers")
+		return Value{}
+	}
+
+	if right_float == 0 {
+		runtime_error("% divisor cannot be zero")
+		return Value{}
+	}
+
+	return Value(left_float - right_float * math.floor(left_float / right_float))
+}
+
+core_equal :: proc(lhs, rhs: Value) -> Value {
+	if lhs == nil || rhs == nil {
+		return Value(bool(lhs == nil && rhs == nil))
+	}
+
+	order, are_numbers := compare_numbers(lhs, rhs)
+	if are_numbers {
+		return Value(bool(order == .EQUAL))
+	}
+
+	left_bool, left_is_bool := lhs.(bool)
+	if left_is_bool {
+		right_bool, right_is_bool := rhs.(bool)
+		return Value(bool(right_is_bool && left_bool == right_bool))
+	}
+
+	left_object, left_is_object := lhs.(^Object)
+	right_object, right_is_object := rhs.(^Object)
+	if !left_is_object || !right_is_object || left_object.kind != right_object.kind {
+		return Value(bool(false))
+	}
+
+	if left_object.kind == .STRING {
+		left_string := cast(^StringObject)left_object
+		right_string := cast(^StringObject)right_object
+		return Value(bool(left_string.text == right_string.text))
+	}
+
+	return Value(bool(left_object == right_object))
+}
+
+core_less :: proc(lhs, rhs: Value) -> Value {
+	order, are_numbers := compare_numbers(lhs, rhs)
+	if !are_numbers {
+		runtime_error("< expects numbers")
+		return Value{}
+	}
+	return Value(bool(order == .LESS))
+}
+
+core_less_equal :: proc(lhs, rhs: Value) -> Value {
+	order, are_numbers := compare_numbers(lhs, rhs)
+	if !are_numbers {
+		runtime_error("<= expects numbers")
+		return Value{}
+	}
+	return Value(bool(order == .LESS || order == .EQUAL))
+}
+
+core_greater :: proc(lhs, rhs: Value) -> Value {
+	order, are_numbers := compare_numbers(lhs, rhs)
+	if !are_numbers {
+		runtime_error("> expects numbers")
+		return Value{}
+	}
+	return Value(bool(order == .GREATER))
+}
+
+core_greater_equal :: proc(lhs, rhs: Value) -> Value {
+	order, are_numbers := compare_numbers(lhs, rhs)
+	if !are_numbers {
+		runtime_error(">= expects numbers")
+		return Value{}
+	}
+	return Value(bool(order == .GREATER || order == .EQUAL))
+}
+
+core_not :: proc(value: Value) -> Value {
+	if value == nil { return Value(bool(true)) }
+
+	boolean, is_bool := value.(bool)
+	if is_bool { return Value(bool(!boolean)) }
+	return Value(bool(false))
+}
+
+core_len :: proc(value: Value) -> Value {
+	object, is_object := value.(^Object)
+	if !is_object {
+		runtime_error("len expects a vector or string")
+		return Value{}
+	}
+
+	switch object.kind {
+	case .STRING:
+		return Value(i64(len((cast(^StringObject)object).text)))
+	case .VECTOR:
+		return Value(i64(len((cast(^VectorObject)object).items)))
+	case .SYMBOL, .LIST, .NATIVE_FUNCTION:
+		runtime_error("len expects a vector or string")
+		return Value{}
+	}
+
+	return Value{}
+}
+
 core_push :: proc(vector_value, item: Value) -> Value {
 	vector_object, vector_is_object := vector_value.(^Object)
 	if !vector_is_object || vector_object.kind != .VECTOR {
@@ -1722,6 +2033,70 @@ native_div :: proc(vm: ^VM, args: []Value) -> Value {
 	return core_div(args)
 }
 
+native_mod :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 2 {
+		runtime_error("% expects two arguments")
+		return Value{}
+	}
+	return core_mod(args[0], args[1])
+}
+
+native_equal :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 2 {
+		runtime_error("= expects two arguments")
+		return Value{}
+	}
+	return core_equal(args[0], args[1])
+}
+
+native_less :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 2 {
+		runtime_error("< expects two arguments")
+		return Value{}
+	}
+	return core_less(args[0], args[1])
+}
+
+native_less_equal :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 2 {
+		runtime_error("<= expects two arguments")
+		return Value{}
+	}
+	return core_less_equal(args[0], args[1])
+}
+
+native_greater :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 2 {
+		runtime_error("> expects two arguments")
+		return Value{}
+	}
+	return core_greater(args[0], args[1])
+}
+
+native_greater_equal :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 2 {
+		runtime_error(">= expects two arguments")
+		return Value{}
+	}
+	return core_greater_equal(args[0], args[1])
+}
+
+native_not :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 1 {
+		runtime_error("not expects one argument")
+		return Value{}
+	}
+	return core_not(args[0])
+}
+
+native_len :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 1 {
+		runtime_error("len expects one argument")
+		return Value{}
+	}
+	return core_len(args[0])
+}
+
 native_push :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) < 2 {
 		runtime_error("push expects a vector and one or more values")
@@ -1747,13 +2122,20 @@ native_pop :: proc(vm: ^VM, args: []Value) -> Value {
 }
 
 native_print :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("print expects one argument")
-		return Value{}
+	for i := 0; i < len(args); i += 1 {
+		if i > 0 {
+			fmt.print(" ")
+		}
+		print_value(args[i])
 	}
-
-	print_value(args[0])
 	fmt.println()
+	return Value{}
+}
+
+native_write :: proc(vm: ^VM, args: []Value) -> Value {
+	for value in args {
+		print_value(value)
+	}
 	return Value{}
 }
 
@@ -1763,9 +2145,18 @@ install_builtins :: proc(vm: ^VM) {
 	bind_native_global(vm, "-", native_sub)
 	bind_native_global(vm, "*", native_mul)
 	bind_native_global(vm, "/", native_div)
+	bind_native_global(vm, "%", native_mod)
+	bind_native_global(vm, "=", native_equal)
+	bind_native_global(vm, "<", native_less)
+	bind_native_global(vm, "<=", native_less_equal)
+	bind_native_global(vm, ">", native_greater)
+	bind_native_global(vm, ">=", native_greater_equal)
+	bind_native_global(vm, "not", native_not)
+	bind_native_global(vm, "len", native_len)
 	bind_native_global(vm, "push", native_push)
 	bind_native_global(vm, "pop", native_pop)
 	bind_native_global(vm, "print", native_print)
+	bind_native_global(vm, "write", native_write)
 }
 
 
@@ -1787,6 +2178,7 @@ run_code :: proc(code: ^Code) -> Value {
 		word := code.bytecode[ip]
 		ip += 1
 
+		// Both instruction layouts store the opcode in the same field.
 		op := InstABC(word).op
 
 		switch op {
@@ -1819,6 +2211,7 @@ run_code :: proc(code: ^Code) -> Value {
 			vm.slots[int(inst.a)] = vm.globals[global_index].value
 
 		case .ADD, .SUB, .MUL, .DIV:
+			// B and C describe one contiguous variadic operand window.
 			inst := InstABC(word)
 			dst := int(inst.a)
 			first_slot := int(inst.b)
@@ -1837,12 +2230,57 @@ run_code :: proc(code: ^Code) -> Value {
 				result = core_div(args)
 			}
 
+			// Error returns are disposable and must not be stored in dst.
 			if vm.error_string != "" {
 				return Value{}
 			}
 			vm.slots[dst] = result
 
+		case .MOD, .EQUAL, .LESS, .LESS_EQUAL, .GREATER, .GREATER_EQUAL:
+			// These binary operations share A=dst, B=lhs, C=rhs.
+			inst := InstABC(word)
+			dst := int(inst.a)
+			lhs := vm.slots[int(inst.b)]
+			rhs := vm.slots[int(inst.c)]
+
+			result: Value
+			#partial switch op {
+			case .MOD:
+				result = core_mod(lhs, rhs)
+			case .EQUAL:
+				result = core_equal(lhs, rhs)
+			case .LESS:
+				result = core_less(lhs, rhs)
+			case .LESS_EQUAL:
+				result = core_less_equal(lhs, rhs)
+			case .GREATER:
+				result = core_greater(lhs, rhs)
+			case .GREATER_EQUAL:
+				result = core_greater_equal(lhs, rhs)
+			}
+
+			if vm.error_string != "" { return Value{} }
+			vm.slots[dst] = result
+
+		case .NOT, .LEN:
+			// These unary operations share A=dst, B=src; LEN may fail.
+			inst := InstABC(word)
+			dst := int(inst.a)
+			src := vm.slots[int(inst.b)]
+
+			result: Value
+			#partial switch op {
+			case .NOT:
+				result = core_not(src)
+			case .LEN:
+				result = core_len(src)
+			}
+
+			if vm.error_string != "" { return Value{} }
+			vm.slots[dst] = result
+
 		case .CALL:
+			// A holds the callee before the call and its result afterward.
 			inst := InstABC(word)
 			base := int(inst.a)
 			argument_count := int(inst.b)
@@ -1854,6 +2292,7 @@ run_code :: proc(code: ^Code) -> Value {
 				return Value{}
 			}
 
+			// Arguments occupy the contiguous slots immediately after A.
 			args := vm.slots[base + 1:base + 1 + argument_count]
 
 			switch callee_object.kind {
@@ -1893,6 +2332,7 @@ run_code :: proc(code: ^Code) -> Value {
 			}
 
 		case .NEW_VECTOR:
+			// Capacity reserves backing storage; the new vector length is zero.
 			inst := InstABx(word)
 			dst := int(inst.a)
 			capacity := int(inst.b)
@@ -1905,17 +2345,20 @@ run_code :: proc(code: ^Code) -> Value {
 			vm.slots[dst] = Value(cast(^Object)new_vector_object(items))
 
 		case .VECTOR_PUSH:
+			// A already holds the vector and remains the result after mutation.
 			inst := InstABC(word)
 			core_push(vm.slots[int(inst.a)], vm.slots[int(inst.b)])
 			if vm.error_string != "" { return Value{} }
 
 		case .VECTOR_POP:
+			// Validate the pop before replacing A with the removed value.
 			inst := InstABC(word)
 			result := core_pop(vm.slots[int(inst.b)])
 			if vm.error_string != "" { return Value{} }
 			vm.slots[int(inst.a)] = result
 
 		case .SET_VECTOR:
+			// C remains the set-expression result; this opcode only mutates A.
 			inst := InstABC(word)
 			vector_value := vm.slots[int(inst.a)]
 			index_value := vm.slots[int(inst.b)]

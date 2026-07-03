@@ -6,7 +6,7 @@ The MVP builtin set we discussed, excluding `and` / `or` / `else`, is this:
 | `-`     |    2+ numbers | int or float | yes                   | No unary negation for now.                                    |
 | `*`     |    2+ numbers | int or float | yes                   | Runtime error on int overflow.                                |
 | `/`     |    2+ numbers | float        | yes                   | Division by zero runtime error.                               |
-| `%`     |     2 numbers | int or float | yes                   | Floor-style modulo recommended.                               |
+| `%`     |     2 numbers | int or float | yes                   | Floor-style modulo.                                           |
 | `=`     |      2 values | bool         | yes                   | Value equality.                                               |
 | `<`     |     2 numbers | bool         | yes                   | Numeric ordering.                                             |
 | `<=`    |     2 numbers | bool         | yes                   | Numeric ordering.                                             |
@@ -14,7 +14,7 @@ The MVP builtin set we discussed, excluding `and` / `or` / `else`, is this:
 | `>=`    |     2 numbers | bool         | yes                   | Numeric ordering.                                             |
 | `not`   |       1 value | bool         | yes                   | Uses Wisp truthiness.                                         |
 | `len`   |       1 value | int          | yes                   | Vector length, string byte length.                            |
-| `push`  | vector, value | vector       | yes, exact arity only | Mutates vector, returns vector.                               |
+| `push`  | vector, 1+ values | vector    | yes                   | Evaluates all arguments before mutation; returns vector.     |
 | `pop`   |        vector | value        | yes, exact arity only | Mutates vector, returns removed value.                        |
 | `print` |     0+ values | nil          | no                    | Display values, space-separated, newline.                     |
 | `write` |     0+ values | nil          | no                    | Display values, no separator, no newline.                     |
@@ -38,7 +38,7 @@ Fast-path these direct known builtin calls:
 (>= a b)
 (not x)
 (len x)
-(push v x)
+(push v x ...)
 (pop v)
 ```
 
