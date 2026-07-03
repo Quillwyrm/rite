@@ -47,6 +47,13 @@
 (print (- 10 2 3))
 (print (* 2 3 4))
 
+; string-dominant addition
+(print (+ "hp: " 100))
+(print (+ "x=" 10 ", y=" 20))
+(print (+ 1 2 "x" 3))
+(print (+ "value: " true))
+(print (+ "v=" [1 2 3]))
+
 ; variadic push
 (print (push [1 2] 3 4 5))
 

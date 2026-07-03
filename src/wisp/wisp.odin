@@ -1622,12 +1622,39 @@ compile_forms :: proc(forms: []Value) -> Code {
 
 // Core operations ================================================================================
 
-// +, -, and * stay int while all operands are ints; / always returns float.
+// Numeric +, -, and * stay int while all operands are ints.
+// + concatenates display text when any operand is a string; / always returns float.
 
 core_add :: proc(args: []Value) -> Value {
 	if len(args) < 2 {
 		runtime_error("+ expects two or more arguments")
 		return Value{}
+	}
+
+	saw_string := false
+	for arg in args {
+		object, is_object := arg.(^Object)
+		if is_object && object.kind == .STRING {
+			saw_string = true
+			break
+		}
+	}
+
+	if saw_string {
+		parts := make([dynamic]string)
+		parents := make([dynamic]^Object)
+
+		for arg in args {
+			append_value_text(&parts, arg, &parents)
+		}
+
+		text := strings.concatenate(parts[:])
+		result := Value(cast(^Object)new_string_object(text))
+
+		delete(text)
+		delete(parts)
+		delete(parents)
+		return result
 	}
 
 	all_int := true
@@ -2497,7 +2524,6 @@ run_code :: proc(code: ^Code) -> Value {
 
 // Host operations ===============================================================================
 
-@(private)
 run_source :: proc(source: string) -> Value {
 	forms := read_source(source)
 	if Reader.failed { return Value{} }

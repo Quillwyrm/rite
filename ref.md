@@ -1012,7 +1012,8 @@ Arguments are evaluated left-to-right before the built-in is called.
 
 | Function | Arity | Returns |
 | --- | ---: | --- |
-| `+`, `-`, `*` | 2+ numbers | int or float |
+| `+` | 2+ values; all numbers or at least one string | int, float, or string |
+| `-`, `*` | 2+ numbers | int or float |
 | `/` | 2+ numbers | float |
 | `%` | 2 numbers | int or float |
 | `=` | 2 values | bool |
@@ -1051,9 +1052,28 @@ Arguments are evaluated left-to-right before the built-in is called.
 (% a b)
 ```
 
-`+`, `-`, `*`, and `/` accept two or more numbers.
+`+` accepts two or more values.
 
-They reduce left-to-right.
+If every argument is a number, `+` returns their numeric sum.
+
+If any argument is a string, `+` returns a fresh string containing the display text of every argument in order.
+
+```scheme
+(+ "hp: " 100)
+; "hp: 100"
+
+(+ 1 2 "x" 3)
+; "12x3"
+
+(+ "value: " true)
+; "value: true"
+```
+
+Without a string argument, every argument to `+` must be a number.
+
+`-`, `*`, and `/` accept two or more numbers.
+
+Numeric arithmetic reduces left-to-right.
 
 ```scheme
 (+ 1 2 3)
@@ -1126,7 +1146,7 @@ Dividing by zero is an error.
 ; error
 ```
 
-`+`, `-`, and `*` return an int when all arguments are ints. They return a float when any argument is a float.
+With numeric arguments, `+`, `-`, and `*` return an int when every argument is an int. They return a float when any argument is a float.
 
 All-int arithmetic is checked after each left-to-right `+`, `-`, or `*` step. If an intermediate result does not fit in an int, evaluation is an error.
 
