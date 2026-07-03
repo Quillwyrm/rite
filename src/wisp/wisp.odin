@@ -52,13 +52,6 @@ Value :: union {
 	^Object,
 }
 
-NumberOrder :: enum {
-	LESS,
-	EQUAL,
-	GREATER,
-	UNORDERED,
-}
-
 // args borrows a contiguous VM slot range for the duration of the call.
 // Native procs must not retain the slice.
 NativeProc :: proc(vm: ^VM, args: []Value) -> Value
@@ -1839,58 +1832,6 @@ core_div :: proc(args: []Value) -> Value {
 	return Value(float_result)
 }
 
-compare_int_float :: proc(integer: i64, number: f64) -> NumberOrder {
-	if number != number { return .UNORDERED }
-
-	lower_bound := f64(min(i64))
-	upper_bound := -lower_bound
-
-	if number < lower_bound { return .GREATER }
-	if number >= upper_bound { return .LESS }
-
-	truncated := i64(number)
-	if integer < truncated { return .LESS }
-	if integer > truncated { return .GREATER }
-
-	integer_float := f64(integer)
-	if integer_float < number { return .LESS }
-	if integer_float > number { return .GREATER }
-	return .EQUAL
-}
-
-// Compares numeric values without first rounding an int to f64.
-compare_numbers :: proc(lhs, rhs: Value) -> (NumberOrder, bool) {
-	#partial switch left in lhs {
-	case i64:
-		#partial switch right in rhs {
-		case i64:
-			if left < right { return .LESS, true }
-			if left > right { return .GREATER, true }
-			return .EQUAL, true
-
-		case f64:
-			return compare_int_float(left, right), true
-		}
-
-	case f64:
-		#partial switch right in rhs {
-		case i64:
-			order := compare_int_float(right, left)
-			if order == .LESS { return .GREATER, true }
-			if order == .GREATER { return .LESS, true }
-			return order, true
-
-		case f64:
-			if left < right { return .LESS, true }
-			if left > right { return .GREATER, true }
-			if left == right { return .EQUAL, true }
-			return .UNORDERED, true
-		}
-	}
-
-	return .UNORDERED, false
-}
-
 core_mod :: proc(lhs, rhs: Value) -> Value {
 	left_int, left_is_int := lhs.(i64)
 	right_int, right_is_int := rhs.(i64)
@@ -1936,9 +1877,22 @@ core_equal :: proc(lhs, rhs: Value) -> Value {
 		return Value(bool(lhs == nil && rhs == nil))
 	}
 
-	order, are_numbers := compare_numbers(lhs, rhs)
-	if are_numbers {
-		return Value(bool(order == .EQUAL))
+	left_int, left_is_int := lhs.(i64)
+	right_int, right_is_int := rhs.(i64)
+	if left_is_int && right_is_int {
+		return Value(bool(left_int == right_int))
+	}
+
+	left_float, left_is_float := lhs.(f64)
+	right_float, right_is_float := rhs.(f64)
+	if left_is_int && right_is_float {
+		return Value(bool(f64(left_int) == right_float))
+	}
+	if left_is_float && right_is_int {
+		return Value(bool(left_float == f64(right_int)))
+	}
+	if left_is_float && right_is_float {
+		return Value(bool(left_float == right_float))
 	}
 
 	left_bool, left_is_bool := lhs.(bool)
@@ -1963,39 +1917,107 @@ core_equal :: proc(lhs, rhs: Value) -> Value {
 }
 
 core_less :: proc(lhs, rhs: Value) -> Value {
-	order, are_numbers := compare_numbers(lhs, rhs)
-	if !are_numbers {
+	left_int, left_is_int := lhs.(i64)
+	right_int, right_is_int := rhs.(i64)
+	if left_is_int && right_is_int {
+		return Value(bool(left_int < right_int))
+	}
+
+	left_float, left_is_float := lhs.(f64)
+	if left_is_int {
+		left_float = f64(left_int)
+	} else if !left_is_float {
 		runtime_error("< expects numbers")
 		return Value{}
 	}
-	return Value(bool(order == .LESS))
+
+	right_float, right_is_float := rhs.(f64)
+	if right_is_int {
+		right_float = f64(right_int)
+	} else if !right_is_float {
+		runtime_error("< expects numbers")
+		return Value{}
+	}
+
+	return Value(bool(left_float < right_float))
 }
 
 core_less_equal :: proc(lhs, rhs: Value) -> Value {
-	order, are_numbers := compare_numbers(lhs, rhs)
-	if !are_numbers {
+	left_int, left_is_int := lhs.(i64)
+	right_int, right_is_int := rhs.(i64)
+	if left_is_int && right_is_int {
+		return Value(bool(left_int <= right_int))
+	}
+
+	left_float, left_is_float := lhs.(f64)
+	if left_is_int {
+		left_float = f64(left_int)
+	} else if !left_is_float {
 		runtime_error("<= expects numbers")
 		return Value{}
 	}
-	return Value(bool(order == .LESS || order == .EQUAL))
+
+	right_float, right_is_float := rhs.(f64)
+	if right_is_int {
+		right_float = f64(right_int)
+	} else if !right_is_float {
+		runtime_error("<= expects numbers")
+		return Value{}
+	}
+
+	return Value(bool(left_float <= right_float))
 }
 
 core_greater :: proc(lhs, rhs: Value) -> Value {
-	order, are_numbers := compare_numbers(lhs, rhs)
-	if !are_numbers {
+	left_int, left_is_int := lhs.(i64)
+	right_int, right_is_int := rhs.(i64)
+	if left_is_int && right_is_int {
+		return Value(bool(left_int > right_int))
+	}
+
+	left_float, left_is_float := lhs.(f64)
+	if left_is_int {
+		left_float = f64(left_int)
+	} else if !left_is_float {
 		runtime_error("> expects numbers")
 		return Value{}
 	}
-	return Value(bool(order == .GREATER))
+
+	right_float, right_is_float := rhs.(f64)
+	if right_is_int {
+		right_float = f64(right_int)
+	} else if !right_is_float {
+		runtime_error("> expects numbers")
+		return Value{}
+	}
+
+	return Value(bool(left_float > right_float))
 }
 
 core_greater_equal :: proc(lhs, rhs: Value) -> Value {
-	order, are_numbers := compare_numbers(lhs, rhs)
-	if !are_numbers {
+	left_int, left_is_int := lhs.(i64)
+	right_int, right_is_int := rhs.(i64)
+	if left_is_int && right_is_int {
+		return Value(bool(left_int >= right_int))
+	}
+
+	left_float, left_is_float := lhs.(f64)
+	if left_is_int {
+		left_float = f64(left_int)
+	} else if !left_is_float {
 		runtime_error(">= expects numbers")
 		return Value{}
 	}
-	return Value(bool(order == .GREATER || order == .EQUAL))
+
+	right_float, right_is_float := rhs.(f64)
+	if right_is_int {
+		right_float = f64(right_int)
+	} else if !right_is_float {
+		runtime_error(">= expects numbers")
+		return Value{}
+	}
+
+	return Value(bool(left_float >= right_float))
 }
 
 value_is_falsey :: proc(value: Value) -> bool {
