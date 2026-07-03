@@ -1,7 +1,9 @@
 package wisp
 
 import "core:fmt"
+import "core:hash"
 import "core:math"
+import "core:mem"
 import "core:os"
 import "core:strconv"
 import "core:strings"
@@ -14,6 +16,7 @@ ObjectKind :: enum u8 {
 	SYMBOL,
 	LIST,
 	VECTOR,
+	MAP,
 	NATIVE_FUNCTION,
 }
 
@@ -25,6 +28,7 @@ Object :: struct {
 StringObject :: struct {
 	header: Object,
 	text:   string,
+	hash:   u64,
 }
 
 SymbolObject :: struct {
@@ -42,6 +46,22 @@ ListObject :: struct {
 VectorObject :: struct {
 	header: Object,
 	items:  [dynamic]Value,
+}
+
+MapEntry :: struct {
+	key:       Value,
+	hash:      u64,
+	value:     Value,
+	tombstone: bool,
+}
+
+// Reader maps store linear source pairs in entries. Runtime maps use entries
+// as open-addressed buckets and maintain count/tombstone_count.
+MapObject :: struct {
+	header:          Object,
+	entries:         [dynamic]MapEntry,
+	count:           int,
+	tombstone_count: int,
 }
 
 // The zero value of this union represents Wisp nil.
@@ -91,9 +111,10 @@ Opcode :: enum u8 {
 	CALL, // ABC: A=callee, B=argument count -> result replaces A; arguments start at A+1
 
 	NEW_VECTOR,  // ABx: A=dst, Bx=initial capacity hint
+	NEW_MAP,     // ABx: A=dst, Bx=initial pair-count hint
 	VECTOR_PUSH, // ABC: A=vector, B=value -> A remains the vector
 	VECTOR_POP,  // ABC: A=dst, B=vector -> removed value goes to A
-	SET_VECTOR,  // ABC: A=vector, B=index, C=value -> expression result remains in C
+	SET_INDEX,   // ABC: A=receiver, B=index/key, C=value -> expression result remains in C
 
 	RETURN, // ABx: A=src
 }
@@ -252,6 +273,229 @@ new_vector_object :: proc(items: [dynamic]Value) -> ^VectorObject {
 	return object
 }
 
+new_map_object :: proc() -> ^MapObject {
+	object := new(MapObject)
+	object.header.kind = .MAP
+	return object
+}
+
+
+// Map storage ====================================================================================
+
+string_hash :: proc(object: ^StringObject) -> u64 {
+	if object.hash == 0 {
+		object.hash = hash.fnv64a(transmute([]byte)object.text)
+	}
+	return object.hash
+}
+
+// Hashes one legal runtime map key. Numeric hashing mirrors Wisp's current
+// mixed comparison rule by first converting ints to f64.
+map_key_hash :: proc(key: Value) -> (u64, bool) {
+	if key == nil {
+		runtime_error("map key cannot be nil")
+		return 0, false
+	}
+
+	switch value in key {
+	case bool:
+		bits := u64(1) if value else u64(0)
+		return hash.fnv64a(mem.ptr_to_bytes(&bits)), true
+
+	case i64:
+		number := f64(value)
+		bits := transmute(u64)number
+		return hash.fnv64a(mem.ptr_to_bytes(&bits)), true
+
+	case f64:
+		if value != value {
+			runtime_error("map key cannot be NaN")
+			return 0, false
+		}
+
+		number := value
+		if number == 0 {
+			number = 0
+		}
+
+		bits := transmute(u64)number
+		return hash.fnv64a(mem.ptr_to_bytes(&bits)), true
+
+	case ^Object:
+		switch value.kind {
+		case .STRING:
+			return string_hash(cast(^StringObject)value), true
+
+		case .SYMBOL:
+			assert(false, "symbol is not a Wisp runtime value")
+			return 0, false
+
+		case .LIST, .VECTOR, .MAP, .NATIVE_FUNCTION:
+			bits := u64(uintptr(value))
+			return hash.fnv64a(mem.ptr_to_bytes(&bits)), true
+		}
+	}
+
+	assert(false, "invalid map key value")
+	return 0, false
+}
+
+// Non-empty bucket arrays always have power-of-two length.
+// nil key + false tombstone is empty; nil key + true tombstone is deleted.
+map_init :: proc(map_object: ^MapObject, entry_capacity: int) {
+	map_object.count = 0
+	map_object.tombstone_count = 0
+
+	if entry_capacity <= 0 {
+		map_object.entries = make([dynamic]MapEntry)
+		return
+	}
+
+	wanted := max(entry_capacity * 2, 8)
+	bucket_count := 1
+	for bucket_count < wanted {
+		bucket_count <<= 1
+	}
+
+	map_object.entries = make([dynamic]MapEntry, bucket_count)
+}
+
+map_find_slot :: proc(map_object: ^MapObject, key: Value, key_hash: u64) -> (index: int, found: bool) {
+	bucket_count := len(map_object.entries)
+	mask := bucket_count - 1
+	start := int(key_hash & u64(mask))
+	first_tombstone := -1
+
+	for probe_offset := 0; probe_offset < bucket_count; probe_offset += 1 {
+		index := (start + probe_offset) & mask
+		entry := &map_object.entries[index]
+
+		if entry.key == nil {
+			if entry.tombstone {
+				if first_tombstone < 0 {
+					first_tombstone = index
+				}
+				continue
+			}
+
+			if first_tombstone >= 0 {
+				return first_tombstone, false
+			}
+			return index, false
+		}
+
+		if entry.hash == key_hash && values_equal(entry.key, key) {
+			return index, true
+		}
+	}
+
+	if first_tombstone >= 0 {
+		return first_tombstone, false
+	}
+
+	panic("map_find_slot reached full table")
+}
+
+map_get :: proc(map_object: ^MapObject, key: Value) -> Value {
+	key_hash, valid_key := map_key_hash(key)
+	if !valid_key { return Value{} }
+
+	if len(map_object.entries) == 0 {
+		return Value{}
+	}
+
+	index, found := map_find_slot(map_object, key, key_hash)
+	if !found {
+		return Value{}
+	}
+
+	return map_object.entries[index].value
+}
+
+map_set :: proc(map_object: ^MapObject, key, value: Value) {
+	if value == nil {
+		map_delete(map_object, key)
+		return
+	}
+
+	key_hash, valid_key := map_key_hash(key)
+	if !valid_key { return }
+
+	if len(map_object.entries) == 0 {
+		map_init(map_object, 4)
+	}
+
+	index, found := map_find_slot(map_object, key, key_hash)
+	if found {
+		map_object.entries[index].value = value
+		return
+	}
+
+	if (map_object.count + map_object.tombstone_count + 1) * 4 >= len(map_object.entries) * 3 {
+		map_grow(map_object)
+		index, found = map_find_slot(map_object, key, key_hash)
+	}
+
+	entry := &map_object.entries[index]
+	if entry.tombstone {
+		map_object.tombstone_count -= 1
+	}
+
+	entry.key = key
+	entry.hash = key_hash
+	entry.value = value
+	entry.tombstone = false
+	map_object.count += 1
+}
+
+map_delete :: proc(map_object: ^MapObject, key: Value) {
+	key_hash, valid_key := map_key_hash(key)
+	if !valid_key { return }
+
+	if len(map_object.entries) == 0 {
+		return
+	}
+
+	index, found := map_find_slot(map_object, key, key_hash)
+	if !found {
+		return
+	}
+
+	entry := &map_object.entries[index]
+	entry.key = nil
+	entry.hash = 0
+	entry.value = Value{}
+	entry.tombstone = true
+	map_object.count -= 1
+	map_object.tombstone_count += 1
+}
+
+map_grow :: proc(map_object: ^MapObject) {
+	old_entries := map_object.entries
+	bucket_count := max(len(old_entries) * 2, 8)
+
+	map_object.entries = make([dynamic]MapEntry, bucket_count)
+	map_object.count = 0
+	map_object.tombstone_count = 0
+
+	for entry in old_entries {
+		if entry.key == nil {
+			continue
+		}
+
+		index, _ := map_find_slot(map_object, entry.key, entry.hash)
+		map_object.entries[index] = MapEntry{
+			key       = entry.key,
+			hash      = entry.hash,
+			value     = entry.value,
+			tombstone = false,
+		}
+		map_object.count += 1
+	}
+
+	delete(old_entries)
+}
+
 
 // Reader character utilities =====================================================================
 
@@ -271,7 +515,10 @@ is_delimiter :: proc(ch: u8) -> bool {
 	       ch == '\'' ||
 	       ch == ';' ||
 	       ch == '[' ||
-	       ch == ']'
+	       ch == ']' ||
+	       ch == '{' ||
+	       ch == '}' ||
+	       ch == ':'
 }
 
 // Leaves Reader.index at the next form byte or the end of source.
@@ -425,6 +672,22 @@ read_string :: proc() -> Value {
 	return Value{}
 }
 
+read_name_string :: proc() -> Value {
+	Reader.index += 1
+	start := Reader.index
+
+	for Reader.index < len(Reader.source) && !is_delimiter(Reader.source[Reader.index]) {
+		Reader.index += 1
+	}
+
+	if Reader.index == start {
+		reader_error("name string requires a name")
+		return Value{}
+	}
+
+	return Value(cast(^Object)new_string_object(Reader.source[start:Reader.index]))
+}
+
 read_list :: proc() -> Value {
 	Reader.index += 1
 
@@ -485,6 +748,59 @@ read_vector :: proc() -> Value {
 	}
 }
 
+read_map :: proc() -> Value {
+	Reader.index += 1
+
+	// Source maps keep linear key/value forms. The compiler creates the runtime table.
+	entries := make([dynamic]MapEntry)
+
+	for {
+		skip_trivia()
+
+		if Reader.index >= len(Reader.source) {
+			reader_error("unterminated map")
+			delete(entries)
+			return Value{}
+		}
+
+		if Reader.source[Reader.index] == '}' {
+			Reader.index += 1
+			object := new_map_object()
+			object.entries = entries
+			return Value(cast(^Object)object)
+		}
+
+		key := read_form()
+		if Reader.failed {
+			delete(entries)
+			return Value{}
+		}
+
+		skip_trivia()
+		if Reader.index >= len(Reader.source) {
+			reader_error("unterminated map")
+			delete(entries)
+			return Value{}
+		}
+		if Reader.source[Reader.index] == '}' {
+			reader_error("map literal expects key/value pairs")
+			delete(entries)
+			return Value{}
+		}
+
+		value := read_form()
+		if Reader.failed {
+			delete(entries)
+			return Value{}
+		}
+
+		append(&entries, MapEntry{
+			key   = key,
+			value = value,
+		})
+	}
+}
+
 read_form :: proc() -> Value {
 	// Whitespace is already skipped; this proc only dispatches the current form.
 	ch := Reader.source[Reader.index]
@@ -500,6 +816,9 @@ read_form :: proc() -> Value {
 	case '"':
 		return read_string()
 
+	case ':':
+		return read_name_string()
+
 	case '\'':
 		reader_error("quote not implemented")
 		return Value{}
@@ -509,6 +828,13 @@ read_form :: proc() -> Value {
 
 	case ']':
 		reader_error("unexpected ']'")
+		return Value{}
+
+	case '{':
+		return read_map()
+
+	case '}':
+		reader_error("unexpected '}'")
 		return Value{}
 
 	case:
@@ -620,6 +946,22 @@ debug_print_value_tree :: proc(value: Value, continuations: ^[dynamic]bool) {
 				pop(continuations)
 			}
 
+		case .MAP:
+			object := cast(^MapObject)v
+			fmt.printf("Map(%d)\n", len(object.entries))
+
+			for i := 0; i < len(object.entries); i += 1 {
+				entry := object.entries[i]
+
+				append(continuations, true)
+				debug_print_value_tree(entry.key, continuations)
+				pop(continuations)
+
+				append(continuations, i + 1 < len(object.entries))
+				debug_print_value_tree(entry.value, continuations)
+				pop(continuations)
+			}
+
 		case .NATIVE_FUNCTION:
 			assert(false, "function in source tree")
 		}
@@ -726,6 +1068,36 @@ append_value_text :: proc(parts: ^[dynamic]string, value: Value, parents: ^[dyna
 			}
 			append(parts, "]")
 
+			pop(parents)
+
+		case .MAP:
+			for parent in parents {
+				if parent == v {
+					append(parts, "{...}")
+					return
+				}
+			}
+			append(parents, v)
+
+			object := cast(^MapObject)v
+			append(parts, "{")
+
+			wrote_entry := false
+			for entry in object.entries {
+				if entry.key == nil {
+					continue
+				}
+
+				if wrote_entry {
+					append(parts, " ")
+				}
+				append_value_text(parts, entry.key, parents)
+				append(parts, " ")
+				append_value_text(parts, entry.value, parents)
+				wrote_entry = true
+			}
+
+			append(parts, "}")
 			pop(parents)
 
 		case .NATIVE_FUNCTION:
@@ -967,6 +1339,12 @@ emit_new_vector :: proc(dst, capacity: int) {
 	emit_ABx(.NEW_VECTOR, dst, capacity)
 }
 
+emit_new_map :: proc(dst, capacity: int) {
+	assert(capacity >= 0 && capacity <= int(max(u16)), "map capacity does not fit u16")
+	record_slots(dst)
+	emit_ABx(.NEW_MAP, dst, capacity)
+}
+
 emit_vector_push :: proc(vector_slot, value_slot: int) {
 	record_slots(vector_slot, value_slot)
 	emit_ABC(.VECTOR_PUSH, vector_slot, value_slot, 0)
@@ -977,9 +1355,9 @@ emit_vector_pop :: proc(dst, vector_slot: int) {
 	emit_ABC(.VECTOR_POP, dst, vector_slot, 0)
 }
 
-emit_set_vector :: proc(vector_slot, index_slot, value_slot: int) {
-	record_slots(vector_slot, index_slot, value_slot)
-	emit_ABC(.SET_VECTOR, vector_slot, index_slot, value_slot)
+emit_set_index :: proc(receiver_slot, index_slot, value_slot: int) {
+	record_slots(receiver_slot, index_slot, value_slot)
+	emit_ABC(.SET_INDEX, receiver_slot, index_slot, value_slot)
 }
 
 emit_return :: proc(src: int) {
@@ -1096,6 +1474,34 @@ compile_vector_expr :: proc(vector: ^VectorObject, dst: int) {
 		if Compiler.failed { return }
 
 		emit_vector_push(dst, item_slot)
+	}
+}
+
+compile_map_expr :: proc(map_object: ^MapObject, dst: int) {
+	// Source entries are linear pairs; runtime table capacity is only a hint.
+	capacity_hint := len(map_object.entries)
+	if capacity_hint > int(max(u16)) {
+		capacity_hint = int(max(u16))
+	}
+
+	emit_new_map(dst, capacity_hint)
+
+	if len(map_object.entries) == 0 {
+		return
+	}
+
+	key_slot := claim_slot()
+	value_slot := claim_slot()
+	if Compiler.failed { return }
+
+	for entry in map_object.entries {
+		compile_expr(entry.key, key_slot)
+		if Compiler.failed { return }
+
+		compile_expr(entry.value, value_slot)
+		if Compiler.failed { return }
+
+		emit_set_index(dst, key_slot, value_slot)
 	}
 }
 
@@ -1264,7 +1670,7 @@ compile_set :: proc(list: ^ListObject, dst: int) {
 		compile_expr(value, dst)
 		if Compiler.failed { return }
 
-		emit_set_vector(receiver_slot, index_slot, dst)
+		emit_set_index(receiver_slot, index_slot, dst)
 		return
 	}
 
@@ -1539,6 +1945,9 @@ compile_expr :: proc(value: Value, dst: int) {
 
 		case .VECTOR:
 			compile_vector_expr(cast(^VectorObject)v, dst)
+
+		case .MAP:
+			compile_map_expr(cast(^MapObject)v, dst)
 
 		case .NATIVE_FUNCTION:
 			compile_error("native function object cannot appear in source")
@@ -1872,48 +2281,54 @@ core_mod :: proc(lhs, rhs: Value) -> Value {
 	return Value(left_float - right_float * math.floor(left_float / right_float))
 }
 
-core_equal :: proc(lhs, rhs: Value) -> Value {
+values_equal :: proc(lhs, rhs: Value) -> bool {
 	if lhs == nil || rhs == nil {
-		return Value(bool(lhs == nil && rhs == nil))
+		return lhs == nil && rhs == nil
 	}
 
 	left_int, left_is_int := lhs.(i64)
 	right_int, right_is_int := rhs.(i64)
 	if left_is_int && right_is_int {
-		return Value(bool(left_int == right_int))
+		return left_int == right_int
 	}
 
 	left_float, left_is_float := lhs.(f64)
 	right_float, right_is_float := rhs.(f64)
+
+	// TODO: Mixed numeric equality loses precision for huge i64 map keys.
 	if left_is_int && right_is_float {
-		return Value(bool(f64(left_int) == right_float))
+		return f64(left_int) == right_float
 	}
 	if left_is_float && right_is_int {
-		return Value(bool(left_float == f64(right_int)))
+		return left_float == f64(right_int)
 	}
 	if left_is_float && right_is_float {
-		return Value(bool(left_float == right_float))
+		return left_float == right_float
 	}
 
 	left_bool, left_is_bool := lhs.(bool)
 	if left_is_bool {
 		right_bool, right_is_bool := rhs.(bool)
-		return Value(bool(right_is_bool && left_bool == right_bool))
+		return right_is_bool && left_bool == right_bool
 	}
 
 	left_object, left_is_object := lhs.(^Object)
 	right_object, right_is_object := rhs.(^Object)
 	if !left_is_object || !right_is_object || left_object.kind != right_object.kind {
-		return Value(bool(false))
+		return false
 	}
 
 	if left_object.kind == .STRING {
 		left_string := cast(^StringObject)left_object
 		right_string := cast(^StringObject)right_object
-		return Value(bool(left_string.text == right_string.text))
+		return left_string.text == right_string.text
 	}
 
-	return Value(bool(left_object == right_object))
+	return left_object == right_object
+}
+
+core_equal :: proc(lhs, rhs: Value) -> Value {
+	return Value(bool(values_equal(lhs, rhs)))
 }
 
 core_less :: proc(lhs, rhs: Value) -> Value {
@@ -2034,7 +2449,7 @@ core_not :: proc(value: Value) -> Value {
 core_len :: proc(value: Value) -> Value {
 	object, is_object := value.(^Object)
 	if !is_object {
-		runtime_error("len expects a vector or string")
+		runtime_error("len expects a vector, map, or string")
 		return Value{}
 	}
 
@@ -2043,8 +2458,10 @@ core_len :: proc(value: Value) -> Value {
 		return Value(i64(len((cast(^StringObject)object).text)))
 	case .VECTOR:
 		return Value(i64(len((cast(^VectorObject)object).items)))
+	case .MAP:
+		return Value(i64((cast(^MapObject)object).count))
 	case .SYMBOL, .LIST, .NATIVE_FUNCTION:
-		runtime_error("len expects a vector or string")
+		runtime_error("len expects a vector, map, or string")
 		return Value{}
 	}
 
@@ -2189,6 +2606,8 @@ native_type :: proc(vm: ^VM, args: []Value) -> Value {
 				type_name = "list"
 			case .VECTOR:
 				type_name = "vector"
+			case .MAP:
+				type_name = "map"
 			case .NATIVE_FUNCTION:
 				type_name = "function"
 			case .SYMBOL:
@@ -2475,6 +2894,16 @@ run_code :: proc(code: ^Code) -> Value {
 
 				vm.slots[base] = vector.items[int(index)]
 
+			case .MAP:
+				if argument_count != 1 {
+					runtime_error("map call expects one key")
+					return Value{}
+				}
+
+				result := map_get(cast(^MapObject)callee_object, vm.slots[base + 1])
+				if vm.error_string != "" { return Value{} }
+				vm.slots[base] = result
+
 			case .STRING, .SYMBOL, .LIST:
 				runtime_error("value is not callable")
 				return Value{}
@@ -2493,6 +2922,15 @@ run_code :: proc(code: ^Code) -> Value {
 
 			vm.slots[dst] = Value(cast(^Object)new_vector_object(items))
 
+		case .NEW_MAP:
+			// Capacity is a pair-count hint; map_init chooses the bucket count.
+			inst := InstABx(word)
+			dst := int(inst.a)
+
+			object := new_map_object()
+			map_init(object, int(inst.b))
+			vm.slots[dst] = Value(cast(^Object)object)
+
 		case .VECTOR_PUSH:
 			// A already holds the vector and remains the result after mutation.
 			inst := InstABC(word)
@@ -2506,32 +2944,43 @@ run_code :: proc(code: ^Code) -> Value {
 			if vm.error_string != "" { return Value{} }
 			vm.slots[int(inst.a)] = result
 
-		case .SET_VECTOR:
+		case .SET_INDEX:
 			// C remains the set-expression result; this opcode only mutates A.
 			inst := InstABC(word)
-			vector_value := vm.slots[int(inst.a)]
+			receiver_value := vm.slots[int(inst.a)]
 			index_value := vm.slots[int(inst.b)]
 			new_value := vm.slots[int(inst.c)]
 
-			vector_object, vector_is_object := vector_value.(^Object)
-			if !vector_is_object || vector_object.kind != .VECTOR {
-				runtime_error("vector set receiver must be vector")
+			receiver_object, receiver_is_object := receiver_value.(^Object)
+			if !receiver_is_object {
+				runtime_error("indexed set receiver must be vector or map")
 				return Value{}
 			}
 
-			index, index_is_int := index_value.(i64)
-			if !index_is_int {
-				runtime_error("vector set index must be int")
+			switch receiver_object.kind {
+			case .VECTOR:
+				index, index_is_int := index_value.(i64)
+				if !index_is_int {
+					runtime_error("vector set index must be int")
+					return Value{}
+				}
+
+				vector := cast(^VectorObject)receiver_object
+				if index < 0 || index >= i64(len(vector.items)) {
+					runtime_error("vector index out of range")
+					return Value{}
+				}
+
+				vector.items[int(index)] = new_value
+
+			case .MAP:
+				map_set(cast(^MapObject)receiver_object, index_value, new_value)
+				if vm.error_string != "" { return Value{} }
+
+			case .STRING, .SYMBOL, .LIST, .NATIVE_FUNCTION:
+				runtime_error("indexed set receiver must be vector or map")
 				return Value{}
 			}
-
-			vector := cast(^VectorObject)vector_object
-			if index < 0 || index >= i64(len(vector.items)) {
-				runtime_error("vector index out of range")
-				return Value{}
-			}
-
-			vector.items[int(index)] = new_value
 
 		case .RETURN:
 			inst := InstABx(word)

@@ -2,7 +2,7 @@
 
 This document describes the intended core surface of Wisp.
 
-Wisp is a small eager Lisp with s-expression syntax, lexical scope, mutable bindings, immutable lists, mutable vectors, and first-class functions.
+Wisp is a small eager Lisp with s-expression syntax, lexical scope, mutable bindings, immutable lists, mutable vectors and maps, and first-class functions.
 
 ## Source Shape
 
@@ -34,7 +34,7 @@ Line comments start with `;` and continue to the end of the line.
 
 ## Lexical Elements
 
-Wisp source consists of names, literals, lists, vectors, comments, and whitespace.
+Wisp source consists of names, literals, lists, vectors, maps, comments, and whitespace.
 
 Names are non-delimiter atoms that are not literals or number literals.
 
@@ -47,6 +47,22 @@ player-name
 <=
 foo.1
 ```
+
+`:` is a delimiter and begins a name string.
+
+```scheme
+:hp
+; "hp"
+```
+
+The colon is not part of the resulting string. The tail must be non-empty.
+
+```scheme
+:
+; error
+```
+
+Because `:` is a delimiter, `foo:bar` is read as the two adjacent forms `foo` and `:bar`.
 
 The literal names are:
 
@@ -89,6 +105,7 @@ float
 string
 list
 vector
+map
 function
 ```
 
@@ -111,6 +128,7 @@ Every other value is truthy, including:
 ""
 empty list values
 []
+{}
 ```
 
 ## Forms
@@ -367,6 +385,14 @@ false
 10
 1.5
 "hello"
+:hp
+```
+
+A name string is ordinary string syntax for delimiter-free text.
+
+```scheme
+(= :hp "hp")
+; true
 ```
 
 ### Names
@@ -405,6 +431,31 @@ Definitions are not valid inside vector literals.
 [(def x 10)]
 ; error
 ```
+
+### Map Literals
+
+A map literal creates a fresh mutable map.
+
+```scheme
+{key-expr value-expr ...}
+```
+
+It must contain complete key/value pairs. For each pair, the key expression is
+evaluated first, then the value expression, then the entry is inserted. Pairs
+are processed left-to-right.
+
+```scheme
+{:hp 100 :name "Rook"}
+```
+
+Equal keys are replaced by later entries.
+
+```scheme
+{:hp 100 :hp 90}
+; {hp 90}
+```
+
+Definitions are not valid in key or value expression positions.
 
 ### List Forms
 
@@ -475,6 +526,7 @@ Callable values:
 ```text
 function
 vector
+map
 ```
 
 Calling any other value is an error.
@@ -496,6 +548,20 @@ Vector calls index the vector.
 A vector call requires exactly one integer index.
 
 An out-of-bounds vector index is an error.
+
+Map calls look up one key.
+
+```scheme
+(def player {:hp 100})
+
+(player :hp)
+; 100
+
+(player :missing)
+; nil
+```
+
+A map call requires exactly one non-`nil` key. A missing valid key returns `nil`.
 
 ## Special Forms
 
@@ -772,7 +838,7 @@ Built-in names may still be shadowed by mutable bindings.
 ; mutates the file binding
 ```
 
-Vector slot mutation:
+Indexed mutation:
 
 ```scheme
 (def v [10 20 30])
@@ -784,6 +850,21 @@ Vector slot mutation:
 ; 99
 ```
 
+Map mutation inserts, replaces, or deletes an entry.
+
+```scheme
+(def player {:hp 100})
+
+(set (player :hp) 90)
+; 90
+
+(set (player :name) "Rook")
+; Rook
+
+(set (player :hp) nil)
+; nil
+```
+
 For indexed `set`, evaluation order is:
 
 ```text
@@ -793,7 +874,12 @@ value expression
 mutation
 ```
 
-The receiver must evaluate to a mutable vector. The index must evaluate to an int.
+The receiver must evaluate to a mutable vector or map.
+
+For vectors, the index must evaluate to an in-range int.
+
+For maps, the key must be non-`nil`. A non-`nil` value inserts or replaces the
+entry. Assigning `nil` deletes it.
 
 ## Closures
 
@@ -881,6 +967,31 @@ Vectors are indexed through call syntax using normal call evaluation.
 A vector call requires exactly one integer index.
 
 An out-of-bounds vector index is an error.
+
+### Maps
+
+Maps are heterogeneous mutable associative containers.
+
+```scheme
+{}
+{:hp 100 :name "Rook"}
+```
+
+Any runtime value except `nil` may be a key.
+
+Map key equality follows Wisp equality:
+
+```text
+bools compare by value
+numbers compare by numeric value
+strings compare by contents
+lists, vectors, maps, and functions compare by identity
+```
+
+Maps cannot store `nil`. Assigning `nil` deletes the entry, and looking up a
+missing key returns `nil`.
+
+Map display order is unspecified.
 
 ### Lists
 
@@ -992,6 +1103,13 @@ Strings compare by contents.
 ```scheme
 (len "hello")
 ; 5
+```
+
+Name strings produce ordinary string values without including the leading colon.
+
+```scheme
+:player-name
+; "player-name"
 ```
 
 ## Built-in Functions
@@ -1211,6 +1329,7 @@ float    -> "float"
 string   -> "string"
 list     -> "list"
 vector   -> "vector"
+map      -> "map"
 function -> "function"
 ```
 
@@ -1224,15 +1343,20 @@ Native and Wisp functions both have the public type name `"function"`.
 
 `len` accepts exactly one argument.
 
-It accepts vectors and strings.
+It accepts vectors, maps, and strings.
 
 For vectors, it returns the number of elements.
+
+For maps, it returns the number of entries.
 
 For strings, it returns the byte length of the UTF-8 string.
 
 ```scheme
 (len [10 20 30])
 ; 3
+
+(len {:hp 100 :name "Rook"})
+; 2
 
 (len "hello")
 ; 5
@@ -1289,13 +1413,14 @@ numbers compare by numeric value.
 strings compare by contents.
 lists compare by identity.
 vectors compare by identity.
+maps compare by identity.
 functions compare by identity.
 different non-numeric kinds are unequal.
 ```
 
 Numeric equality treats equal int and float values as equal.
 
-Mixed numeric equality compares exact numeric values without first rounding the int to a float.
+Mixed numeric equality converts the int to a float before comparison.
 
 ```scheme
 (= 1 1.0)
@@ -1315,7 +1440,7 @@ Ordering comparisons accept two numbers and return a bool.
 
 Mixed int/float comparison is allowed.
 
-Mixed numeric ordering compares exact numeric values without first rounding the int to a float.
+Mixed numeric ordering converts the int to a float before comparison.
 
 Non-number operands are an error.
 
@@ -1401,6 +1526,7 @@ false     -> false
 strings   -> their text without quotes
 lists     -> parenthesized values
 vectors   -> bracketed values
+maps      -> braced key/value pairs
 functions -> <function>
 ```
 
@@ -1418,6 +1544,9 @@ Examples:
 
 (print [1 2 3])
 ; [1 2 3]
+
+(print {:hp 100 :name "Rook"})
+; {hp 100 name Rook}
 ```
 
 ## Examples
@@ -1553,4 +1682,22 @@ message
 
 (pop v)
 ; 123
+```
+
+### Maps
+
+```scheme
+(def player {:hp 100 :name "Rook"})
+
+(player :hp)
+; 100
+
+(set (player :hp) 90)
+; 90
+
+(set (player :name) nil)
+; nil
+
+(len player)
+; 1
 ```

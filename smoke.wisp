@@ -1,68 +1,375 @@
+; Wisp smoke
+; A readable tour of the current semantic surface. Not a test suite.
+(def nl print)
+
+(write "\n")
+(print "== values and types ==")
+(nl)
+
+(def out print)
 (def label "wisp smoke")
+
+(out label)
+(out [nil true false 1 1.0 "text"])
+(out [(type nil)
+      (type true)
+      (type 1)
+      (type 1.0)
+      (type "x")
+      (type [])
+      (type {})
+      (type +)])
+
+
+(nl)
+(print "== arithmetic and comparison ==")
+(nl)
+
+(out [(+ 1 2 3)
+      (- 20 5 3)
+      (* 2 3 4)
+      (/ 20 2 5)
+      (% -1 8)])
+
+(out [(= 1 1.0)
+      (< 1 2)
+      (<= 2 2)
+      (> 3 2)
+      (>= 3 3)])
+
+(out [(not nil)
+      (not false)
+      (not 0)
+      (not "")])
+
+
+(nl)
+(print "== strings and output ==")
+(nl)
+
+(out (+ "name=" "wisp"))
+(out (+ "count=" 3 ", values=" [10 20 30]))
+(out (+ "map=" {:a 1 :b 2}))
+
+(write "write")
+(write " + ")
+(print "print")
+
+
+(nl)
+(print "== vectors ==")
+(nl)
+
 (def values [10 20 30])
-(def output print)
+
+(out values)
+(out (values 1))
 
 (set (values 1)
   (+ (values 0) (values 2)))
 
-(print label)
-(print values)
-(print (values 1))
+(out values)
 
-(print (push values 50))
-(print (pop values))
-(print values)
+(push values 50 60)
 
-(print
+(out values)
+(out (pop values))
+(out values)
+
+(out [(len values)
+      (len "wisp")])
+
+
+(nl)
+(print "== scoped bodies and bindings ==")
+(nl)
+
+(out
   (do
     (def x 5)
-    (* x 2)))
+    (def y 7)
+    (+ (* x 2) y)))
 
 (def previous 10)
 (set previous [previous])
-(print previous)
 
-(print [nil true false 2.5])
-(print (/ 20 2 5))
-(print [(% -1 8) (= 1 1.0) (< 1 2) (>= 2 2)])
-(print [(not nil) (not false) (not 0)])
-(print [(len values) (len "wisp")])
-(print [(type nil) (type true) (type 1) (type 1.0) (type "x") (type values) (type +)])
-(assert true "not displayed")
-
-(print [ + - / * ])
+(out previous)
 
 (def add +)
-(print (add 400 20))
+(out (add 400 20))
+(out [ + - * / ])
 
-(print "hello" 420 60. [nil true])
-(write "hello" 420 60. [nil true])
-(write "write")
-(print " works")
 
-(output "done")
+(nl)
+(print "== maps ==")
+(nl)
 
-; variadic arithmetic 3+ args
-(print (+ 1 2 3))
-(print (- 10 2 3))
-(print (* 2 3 4))
+(def record
+  {:name "demo"
+   :count 3
+   :active true
+   :tags ["alpha" "beta" "stable"]})
 
-; string-dominant addition
-(print (+ "hp: " 100))
-(print (+ "x=" 10 ", y=" 20))
-(print (+ 1 2 "x" 3))
-(print (+ "value: " true))
-(print (+ "v=" [1 2 3]))
+(print record)
+(print [(record :name)
+      (record :count)
+      (record :active)
+      (record :missing)])
 
-; variadic push
-(print (push [1 2] 3 4 5))
+(set (record :count)
+  (+ (record :count) 1))
 
-; vector self-cycle display
+(set (record :extra) "added")
+
+(out record)
+
+(set (record :extra) nil)
+
+(out [(record :extra)
+      (len record)])
+(out record)
+
+
+(nl)
+(print "== nested data ==")
+(nl)
+
+(def document
+  {:title "notes"
+   :meta {:author "Rook"
+          :version 1
+          :published false}
+   :rows [{:id 1 :label "first"  :value 10}
+          {:id 2 :label "second" :value 20}
+          {:id 3 :label "third"  :value 30}]})
+
+(out document)
+
+(def meta (document :meta))
+(def rows (document :rows))
+(def first-row (rows 0))
+(def second-row (rows 1))
+
+(out [(document :title)
+      (meta :author)
+      (first-row :label)
+      (second-row :value)])
+
+(set (meta :version)
+  (+ (meta :version) 1))
+
+(set (second-row :value)
+  (+ (second-row :value) 5))
+
+(push rows
+  {:id 4 :label "fourth" :value 40})
+
+(out meta)
+(out rows)
+(out document)
+
+
+(nl)
+(print "== nested indexed set ==")
+(nl)
+
+(set (((document :rows) 0) :value) 11)
+(set (((document :rows) 2) :label) "updated-third")
+
+(out (document :rows))
+
+
+(nl)
+(print "== dynamic and numeric keys ==")
+(nl)
+
+(def key (+ "co" "unt"))
+(out (record key))
+
+(def lookup
+  {1 "one"
+   2 "two"
+   1.5 "one-point-five"})
+
+(out [(lookup 1)
+      (lookup 1.0)
+      (lookup 2)
+      (lookup 1.5)])
+
+(def object-key [])
+(def keyed {object-key "vector-key"})
+
+(out (keyed object-key))
+
+(nl)
+(print "== map lab ==")
+(nl)
+
+(def lab {})
+
+(set (lab :name) "lab")
+(set (lab :count) 1)
+(set (lab :active) true)
+
+(out lab)
+(out [(lab :name) (lab :count) (lab :active)])
+
+
+(nl)
+(print "== map lab: dynamic string keys ==")
+(nl)
+
+(def count-key (+ "co" "unt"))
+(def active-key :active)
+
+(out [(lab count-key)
+      (lab "count")
+      (lab active-key)])
+
+(set (lab count-key)
+  (+ (lab count-key) 9))
+
+(out [(lab :count) (lab count-key)])
+
+
+(nl)
+(print "== map lab: duplicate keys ==")
+(nl)
+
+(def duplicate
+  {:x 1
+   :x 2
+   (+ "" "x") 3})
+
+(out duplicate)
+(out (duplicate :x))
+
+
+(nl)
+(print "== map lab: non-string keys ==")
+(nl)
+
+(def mixed
+  {true "true-key"
+   false "false-key"
+   1 "one"
+   2.5 "two-point-five"
+   + "plus-function"})
+
+(out [(mixed true)
+      (mixed false)
+      (mixed 1)
+      (mixed 1.0)
+      (mixed 2.5)
+      (mixed +)])
+
+
+(nl)
+(print "== map lab: identity keys ==")
+(nl)
+
+(def key-a [])
+(def key-b [])
+(def key-c [])
+
+(def identity
+  {key-a "a"
+   key-b "b"})
+
+(out [(identity key-a)
+      (identity key-b)
+      (identity key-c)
+      (identity [])])
+
+(push key-a "changed")
+
+(out [(identity key-a)
+      key-a])
+
+
+(nl)
+(print "== map lab: map keys ==")
+(nl)
+
+(def map-key {:kind "key"})
+(def map-key-other {:kind "key"})
+
+(def keyed-by-map
+  {map-key "same-map-object"})
+
+(out [(keyed-by-map map-key)
+      (keyed-by-map map-key-other)])
+
+(set (map-key :kind) "changed")
+
+(out [(keyed-by-map map-key)
+      map-key])
+
+
+(nl)
+(print "== map lab: delete and replace ==")
+(nl)
+
+(def edits {:a 1 :b 2 :c 3})
+
+(out edits)
+
+(set (edits :b) nil)
+(set (edits :c) 30)
+(set (edits :d) 4)
+
+(out edits)
+(out [(edits :a)
+      (edits :b)
+      (edits :c)
+      (edits :d)
+      (len edits)])
+
+
+(nl)
+(print "== map lab: nested dynamic update ==")
+(nl)
+
+(def store
+  {:users
+     [{:id 1 :name "Ada"  :score 10}
+      {:id 2 :name "Bea"  :score 20}
+      {:id 3 :name "Cy"   :score 30}]
+   :selected 1
+   :field :score})
+
+(def users (store :users))
+(def selected-user (users (store :selected)))
+(def field (store :field))
+
+(out selected-user)
+(out (selected-user field))
+
+(set (selected-user field)
+  (+ (selected-user field) 5))
+
+(out selected-user)
+(out store)
+
+(nl)
+(print "== display cycles ==")
+(nl)
+
 (def cycle [])
 (push cycle cycle)
-(print cycle)
 
-values
+(out cycle)
 
-; error builtin (must be last — terminates execution)
-(error "test-error")
+(def self {})
+(set (self :self) self)
+
+(out self)
+
+
+(nl)
+(print "== assert ==")
+(nl)
+
+(assert (= (record :name) "demo") "record name changed")
+
+(out "done")
