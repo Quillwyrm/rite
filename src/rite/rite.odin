@@ -117,6 +117,9 @@ Opcode :: enum u8 {
 	SET_INDEX,   // ABC: A=receiver, B=index/key, C=value -> expression result remains in C
 
 	RETURN, // ABx: A=src
+
+	JUMP,           // Ax: A=target instruction index
+	JUMP_IF_FALSEY, // ABx: A=cond_slot, Bx=target instruction index
 }
 
 InstABC :: bit_field u32 {
@@ -130,6 +133,11 @@ InstABx :: bit_field u32 {
 	op: Opcode | 8,
 	a:  u8     | 8,
 	b:  u16    | 16,
+}
+
+InstAx :: bit_field u32 {
+	op: Opcode | 8,
+	a:  u32    | 24,
 }
 
 // Finished executable chunk owning its bytecode and constants.
@@ -1428,6 +1436,43 @@ emit_return :: proc(src: int) {
 	emit_ABx(.RETURN, src, 0)
 }
 
+emit_Ax :: proc(op: Opcode, a: int) {
+	assert(a >= 0 && a <= 0xffffff, "Ax operand does not fit u24")
+	append(&Active_Code.bytecode, u32(InstAx{
+		op = op,
+		a  = u32(a),
+	}))
+}
+
+emit_jump :: proc(target_index: int) {
+	emit_Ax(.JUMP, target_index)
+}
+
+emit_jump_if_falsey :: proc(cond_slot, target_index: int) {
+	assert(target_index >= 0 && target_index <= int(max(u16)), "jump target does not fit u16")
+	record_slots(cond_slot)
+	emit_ABx(.JUMP_IF_FALSEY, cond_slot, target_index)
+}
+
+patch_jump_target :: proc(jump_index, target_index: int) {
+	op := Opcode(u8(Active_Code.bytecode[jump_index] & 0xff))
+
+	if op == .JUMP {
+		assert(target_index >= 0 && target_index <= 0xffffff, "jump target does not fit u24")
+		Active_Code.bytecode[jump_index] = u32(InstAx{op = .JUMP, a = u32(target_index)})
+		return
+	}
+
+	if op == .JUMP_IF_FALSEY {
+		assert(target_index >= 0 && target_index <= int(max(u16)), "jump target does not fit u16")
+		old := InstABx(Active_Code.bytecode[jump_index])
+		Active_Code.bytecode[jump_index] = u32(InstABx{op = .JUMP_IF_FALSEY, a = old.a, b = u16(target_index)})
+		return
+	}
+
+	panic("patch_jump_target expected JUMP or JUMP_IF_FALSEY")
+}
+
 
 // Compiler =======================================================================================
 
@@ -1667,6 +1712,80 @@ compile_do :: proc(list: ^ListObject, dst: int) {
 	Compiler.local_count = local_mark
 	Compiler.next_slot = slot_mark
 	Compiler.current_scope_local_start = outer_scope_start
+}
+
+compile_if :: proc(list: ^ListObject, dst: int) {
+	if len(list.items) < 3 || len(list.items) > 4 {
+		compile_error("`if` expects a condition, then-branch, and optional else-branch")
+		return
+	}
+
+	compile_expr(list.items[1], dst)
+	if Compiler.failed { return }
+
+	false_jump := len(Active_Code.bytecode)
+	emit_jump_if_falsey(dst, 0)
+	if Compiler.failed { return }
+
+	compile_expr(list.items[2], dst)
+	if Compiler.failed { return }
+
+	end_jump := len(Active_Code.bytecode)
+	emit_jump(0)
+	if Compiler.failed { return }
+
+	patch_jump_target(false_jump, len(Active_Code.bytecode))
+
+	if len(list.items) == 4 {
+		compile_expr(list.items[3], dst)
+	} else {
+		emit_load_nil(dst)
+	}
+	if Compiler.failed { return }
+
+	patch_jump_target(end_jump, len(Active_Code.bytecode))
+}
+
+compile_while :: proc(list: ^ListObject, dst: int) {
+	if len(list.items) < 2 {
+		compile_error("`while` expects a condition")
+		return
+	}
+
+	local_mark := Compiler.local_count
+	slot_mark := Compiler.next_slot
+	outer_scope_start := Compiler.current_scope_local_start
+
+	discard_slot := claim_slot()
+	if Compiler.failed { return }
+
+	loop_start := len(Active_Code.bytecode)
+
+	compile_expr(list.items[1], discard_slot)
+	if Compiler.failed { return }
+
+	exit_jump := len(Active_Code.bytecode)
+	emit_jump_if_falsey(discard_slot, 0)
+	if Compiler.failed { return }
+
+	Compiler.current_scope_local_start = Compiler.local_count
+
+	body_discard_slot := claim_slot()
+	if Compiler.failed { return }
+
+	compile_body(list.items[2:], body_discard_slot)
+	if Compiler.failed { return }
+
+	Compiler.local_count = local_mark
+	Compiler.next_slot = slot_mark
+	Compiler.current_scope_local_start = outer_scope_start
+
+	emit_jump(loop_start)
+
+	patch_jump_target(exit_jump, len(Active_Code.bytecode))
+	if Compiler.failed { return }
+
+	emit_load_nil(dst)
 }
 
 compile_set :: proc(list: ^ListObject, dst: int) {
@@ -1921,10 +2040,16 @@ compile_list_expr :: proc(list: ^ListObject, dst: int) {
 		compile_do(list, dst)
 		return
 	}
-	if head.text == "if" ||
-	   head.text == "while" ||
-	   head.text == "fn" {
-		compile_error(fmt.tprintf("`%s` is not implemented", head.text))
+	if head.text == "if" {
+		compile_if(list, dst)
+		return
+	}
+	if head.text == "while" {
+		compile_while(list, dst)
+		return
+	}
+	if head.text == "fn" {
+		compile_error("`fn` is not implemented")
 		return
 	}
 
@@ -2567,22 +2692,27 @@ core_pop :: proc(vector_value: Value) -> Value {
 
 // Native builtins ================================================================================
 
+// (+ a b ...) -> int|float|string ; sum of numbers or string concatenation
 native_add :: proc(vm: ^VM, args: []Value) -> Value {
 	return core_add(args)
 }
 
+// (- a b ...) -> int|float ; subtract
 native_sub :: proc(vm: ^VM, args: []Value) -> Value {
 	return core_sub(args)
 }
 
+// (* a b ...) -> int|float ; multiply
 native_mul :: proc(vm: ^VM, args: []Value) -> Value {
 	return core_mul(args)
 }
 
+// (/ a b ...) -> float ; divide
 native_div :: proc(vm: ^VM, args: []Value) -> Value {
 	return core_div(args)
 }
 
+// (% a b) -> int|float ; floor modulo
 native_mod :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 2 {
 		runtime_error("% expects two arguments")
@@ -2591,6 +2721,7 @@ native_mod :: proc(vm: ^VM, args: []Value) -> Value {
 	return core_mod(args[0], args[1])
 }
 
+// (= a b) -> bool ; equality
 native_equal :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 2 {
 		runtime_error("= expects two arguments")
@@ -2599,6 +2730,7 @@ native_equal :: proc(vm: ^VM, args: []Value) -> Value {
 	return core_equal(args[0], args[1])
 }
 
+// (!= a b) -> bool ; inequality
 native_not_equal :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 2 {
 		runtime_error("!= expects two arguments")
@@ -2607,6 +2739,7 @@ native_not_equal :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(bool(!values_equal(args[0], args[1])))
 }
 
+// (< a b) -> bool ; less than
 native_less :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 2 {
 		runtime_error("< expects two arguments")
@@ -2615,6 +2748,7 @@ native_less :: proc(vm: ^VM, args: []Value) -> Value {
 	return core_less(args[0], args[1])
 }
 
+// (<= a b) -> bool ; less or equal
 native_less_equal :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 2 {
 		runtime_error("<= expects two arguments")
@@ -2623,6 +2757,7 @@ native_less_equal :: proc(vm: ^VM, args: []Value) -> Value {
 	return core_less_equal(args[0], args[1])
 }
 
+// (> a b) -> bool ; greater than
 native_greater :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 2 {
 		runtime_error("> expects two arguments")
@@ -2631,6 +2766,7 @@ native_greater :: proc(vm: ^VM, args: []Value) -> Value {
 	return core_greater(args[0], args[1])
 }
 
+// (>= a b) -> bool ; greater or equal
 native_greater_equal :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 2 {
 		runtime_error(">= expects two arguments")
@@ -2639,6 +2775,7 @@ native_greater_equal :: proc(vm: ^VM, args: []Value) -> Value {
 	return core_greater_equal(args[0], args[1])
 }
 
+// (not a) -> bool ; logical not
 native_not :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("not expects one argument")
@@ -2647,6 +2784,7 @@ native_not :: proc(vm: ^VM, args: []Value) -> Value {
 	return core_not(args[0])
 }
 
+// (nil? a) -> bool ; nil check
 native_nil_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("nil? expects one argument")
@@ -2655,6 +2793,7 @@ native_nil_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(bool(args[0] == nil))
 }
 
+// (bool? a) -> bool ; bool check
 native_bool_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("bool? expects one argument")
@@ -2664,6 +2803,7 @@ native_bool_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(bool(is_bool))
 }
 
+// (num? a) -> bool ; number check (int or float)
 native_number_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("num? expects one argument")
@@ -2674,6 +2814,7 @@ native_number_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(bool(is_int || is_float))
 }
 
+// (int? a) -> bool ; int check
 native_int_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("int? expects one argument")
@@ -2683,6 +2824,7 @@ native_int_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(bool(is_int))
 }
 
+// (float? a) -> bool ; float check
 native_float_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("float? expects one argument")
@@ -2692,6 +2834,7 @@ native_float_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(bool(is_float))
 }
 
+// (str? a) -> bool ; string check
 native_string_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("str? expects one argument")
@@ -2701,6 +2844,7 @@ native_string_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(bool(is_object && object.kind == .STRING))
 }
 
+// (vec? a) -> bool ; vector check
 native_vector_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("vec? expects one argument")
@@ -2710,6 +2854,7 @@ native_vector_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(bool(is_object && object.kind == .VECTOR))
 }
 
+// (map? a) -> bool ; map check
 native_map_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("map? expects one argument")
@@ -2719,6 +2864,7 @@ native_map_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(bool(is_object && object.kind == .MAP))
 }
 
+// (fn? a) -> bool ; function check
 native_function_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("fn? expects one argument")
@@ -2728,6 +2874,7 @@ native_function_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(bool(is_object && object.kind == .NATIVE_FUNCTION))
 }
 
+// (len a) -> int ; length of string, vector, or map
 native_len :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("len expects one argument")
@@ -2736,6 +2883,7 @@ native_len :: proc(vm: ^VM, args: []Value) -> Value {
 	return core_len(args[0])
 }
 
+// (copy a) -> vector|map ; shallow copy
 native_copy :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("copy expects one argument")
@@ -2779,6 +2927,7 @@ native_copy :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value{}
 }
 
+// (clear a) -> vector|map ; remove all entries
 native_clear :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("clear expects one argument")
@@ -2814,6 +2963,7 @@ native_clear :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value{}
 }
 
+// (type a) -> string ; type name
 native_type :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("type expects one argument")
@@ -2855,6 +3005,7 @@ native_type :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(cast(^Object)new_string_object(type_name))
 }
 
+// (assert cond) or (assert cond msg) -> nil ; fail if condition is falsey
 native_assert :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) < 1 || len(args) > 2 {
 		runtime_error("assert expects a condition and optional message")
@@ -2874,6 +3025,7 @@ native_assert :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value{}
 }
 
+// (error msg) -> nil ; end the run with a diagnostic
 native_error :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("error expects one argument")
@@ -2886,6 +3038,7 @@ native_error :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value{}
 }
 
+// (push v val ...) -> vector ; append values
 native_push :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) < 2 {
 		runtime_error("push expects a vector and one or more values")
@@ -2901,6 +3054,7 @@ native_push :: proc(vm: ^VM, args: []Value) -> Value {
 	return vector_value
 }
 
+// (pop v) -> value ; remove and return last element
 native_pop :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("pop expects one argument")
@@ -2910,6 +3064,7 @@ native_pop :: proc(vm: ^VM, args: []Value) -> Value {
 	return core_pop(args[0])
 }
 
+// (insert v idx val) -> vector ; insert at index, shift right
 native_insert :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 3 {
 		runtime_error("insert expects a vector, index, and value")
@@ -2938,6 +3093,7 @@ native_insert :: proc(vm: ^VM, args: []Value) -> Value {
 	return args[0]
 }
 
+// (remove v idx) -> value ; remove at index, shift left
 native_remove :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 2 {
 		runtime_error("remove expects a vector and index")
@@ -2967,6 +3123,7 @@ native_remove :: proc(vm: ^VM, args: []Value) -> Value {
 	return result
 }
 
+// (slice v start count) -> vector ; fresh sub-vector
 native_slice :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 3 {
 		runtime_error("slice expects a vector, start, and count")
@@ -3002,6 +3159,7 @@ native_slice :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(cast(^Object)new_vector_object(items))
 }
 
+// (keys m) -> vector ; map keys
 native_keys :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("keys expects one argument")
@@ -3027,6 +3185,7 @@ native_keys :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(cast(^Object)new_vector_object(items))
 }
 
+// (vals m) -> vector ; map values
 native_vals :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("vals expects one argument")
@@ -3052,6 +3211,7 @@ native_vals :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(cast(^Object)new_vector_object(items))
 }
 
+// (pairs m) -> vector ; key-value pair vectors
 native_pairs :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("pairs expects one argument")
@@ -3082,6 +3242,7 @@ native_pairs :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(cast(^Object)new_vector_object(items))
 }
 
+// (merge a b ...) -> map ; merge maps, later entries replace earlier
 native_merge :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) < 2 {
 		runtime_error("merge expects two or more maps")
@@ -3117,6 +3278,7 @@ native_merge :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(cast(^Object)result)
 }
 
+// (print ...) -> nil ; display values separated by spaces, with newline
 native_print :: proc(vm: ^VM, args: []Value) -> Value {
 	for i := 0; i < len(args); i += 1 {
 		if i > 0 {
@@ -3128,6 +3290,7 @@ native_print :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value{}
 }
 
+// (write ...) -> nil ; display values without separator or newline
 native_write :: proc(vm: ^VM, args: []Value) -> Value {
 	for value in args {
 		print_value(value)
@@ -3145,7 +3308,6 @@ make_vm :: proc() -> VM {
 	return vm
 }
 
-@(private)
 install_builtins :: proc(vm: ^VM) {
 	// Supplied globals are immutable; install them exactly once per VM.
 	bind_native_global(vm, "+", native_add)
@@ -3441,6 +3603,17 @@ run_code :: proc(code: ^Code) -> Value {
 			case .STRING, .SYMBOL, .LIST, .NATIVE_FUNCTION:
 				runtime_error("indexed set receiver must be vector or map")
 				return Value{}
+			}
+
+		case .JUMP:
+			inst := InstAx(word)
+			ip = int(inst.a)
+
+		case .JUMP_IF_FALSEY:
+			inst := InstABx(word)
+			cond := vm.slots[int(inst.a)]
+			if value_is_falsey(cond) {
+				ip = int(inst.b)
 			}
 
 		case .RETURN:

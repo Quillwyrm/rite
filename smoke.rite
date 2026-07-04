@@ -412,6 +412,100 @@
 (out self)
 
 
+(print)
+(print "== control flow ==")
+(print)
+
+(print [(if true "yes" "no")
+        (if false "yes" "no")
+        (if true "then-only")
+        (if false "missing")])
+
+(print [(if nil "bad" "nil is falsey")
+        (if false "bad" "false is falsey")
+        (if 0 "0 is truthy" "bad")
+        (if "" "empty string is truthy" "bad")
+        (if [] "empty vector is truthy" "bad")
+        (if {} "empty map is truthy" "bad")])
+
+(print
+  (if true
+    (do
+      (def then-msg "then do-body")
+      then-msg)
+    "else"))
+
+(print
+  (if false
+    "then"
+    (do
+      (def else-msg "else do-body")
+      else-msg)))
+
+
+(print "== control flow: chained if ==")
+
+(def cf-score 75)
+
+(def cf-band
+  (if (< cf-score 50)
+    "fail"
+    (if (< cf-score 70)
+      "pass"
+      (if (< cf-score 90)
+        "merit"
+        "distinction"))))
+
+(print [cf-score cf-band])
+
+
+(print "== control flow: while ==")
+
+(def cf-n 0)
+(def cf-total 0)
+(def cf-rows [])
+
+(while (< cf-n 5)
+  (push cf-rows
+    {:n cf-n
+     :kind (if (= (% cf-n 2) 0) "even" "odd")})
+
+  (set cf-total (+ cf-total cf-n))
+  (set cf-n (+ cf-n 1)))
+
+(print cf-rows)
+(print [cf-total cf-n])
+
+
+(print "== control flow: while not entered ==")
+
+(def cf-never [])
+
+(while false
+  (push cf-never "nope"))
+
+(print cf-never)
+
+
+(print "== control flow: nested while ==")
+
+(def cf-table [])
+(def cf-x 1)
+
+(while (<= cf-x 3)
+  (def cf-row [])
+  (def cf-y 1)
+
+  (while (<= cf-y 3)
+    (push cf-row (* cf-x cf-y))
+    (set cf-y (+ cf-y 1)))
+
+  (push cf-table cf-row)
+  (set cf-x (+ cf-x 1)))
+
+(print cf-table)
+
+
 (nl)
 (print "== assert ==")
 (nl)
