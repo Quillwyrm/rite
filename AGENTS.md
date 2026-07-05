@@ -10,22 +10,31 @@ Build the optimized executable:
 odin build src -out:rite.exe -o:speed
 ```
 
-Run normal program output:
+Run a file:
 
 ```powershell
-.\rite.exe
+.\rite.exe smoke.rite
 ```
 
-Run with source-tree diagnostics before program output:
+Evaluate a source string:
 
 ```powershell
-.\rite.exe dbg
+.\rite.exe eval "(+ 1 2)"
 ```
 
-The CLI accepts either no argument or the single argument `dbg`. Any other arguments print:
+The CLI accepts:
+
+- `rite <file>`
+- `rite eval <string>`
+
+If the file path does not exist and has no `.rite` suffix, Rite also tries
+`<file>.rite`.
+
+Any other arguments print:
 
 ```text
-usage: rite [dbg]
+usage: rite <file>
+       rite eval <string>
 ```
 
 ## My general coding/design ethos

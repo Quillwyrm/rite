@@ -40,7 +40,7 @@ SymbolObject :: struct {
 ListObject :: struct {
 	header: Object,
 
-	// Lists are immutable Rite values. This storage is built once and is not mutated by language operations.
+	// Reader lists hold source forms. Rite does not expose a runtime list literal.
 	items: [dynamic]Value,
 }
 
@@ -1802,22 +1802,13 @@ compile_map_expr :: proc(builder: ^CodeBuilder, map_object: ^MapObject, dst: int
 	}
 }
 
-compile_def :: proc(builder: ^CodeBuilder, form: Value) {
-	object, is_object := form.(^Object)
-	assert(is_object && object.kind == .LIST, "compile_def expected list form")
-
-	list := cast(^ListObject)object
+compile_value_def :: proc(builder: ^CodeBuilder, list: ^ListObject) {
 	if len(list.items) != 3 {
-		compile_error("`def` expects a name and value")
+		compile_error("value `def` expects a name and value")
 		return
 	}
 
-	name_object, name_is_object := list.items[1].(^Object)
-	if !name_is_object || name_object.kind != .SYMBOL {
-		compile_error("`def` name must be a name")
-		return
-	}
-
+	name_object, _ := list.items[1].(^Object)
 	name := cast(^SymbolObject)name_object
 	if symbol_is_reserved_name(name) {
 		compile_error(fmt.tprintf("cannot define reserved name `%s`", name.text))
@@ -1843,6 +1834,145 @@ compile_def :: proc(builder: ^CodeBuilder, form: Value) {
 		slot   = binding_slot,
 	}
 	builder.local_count += 1
+}
+
+compile_named_fn_def :: proc(builder: ^CodeBuilder, def_list: ^ListObject, signature: ^ListObject) {
+	if len(signature.items) == 0 {
+		compile_error("function `def` signature must start with a name")
+		return
+	}
+
+	name_object, name_is_object := signature.items[0].(^Object)
+	if !name_is_object || name_object.kind != .SYMBOL {
+		compile_error("function `def` name must be a name")
+		return
+	}
+
+	name := cast(^SymbolObject)name_object
+	if symbol_is_reserved_name(name) {
+		compile_error(fmt.tprintf("cannot define reserved name `%s`", name.text))
+		return
+	}
+
+	for i := builder.current_scope_local_start; i < builder.local_count; i += 1 {
+		if builder.local_bindings[i].symbol == name {
+			compile_error(fmt.tprintf("duplicate definition `%s` in the same scope", name.text))
+			return
+		}
+	}
+
+	param_count := len(signature.items) - 1
+	if param_count > int(max(u8)) {
+		compile_error("function has too many parameters")
+		return
+	}
+
+	for i := 0; i < param_count; i += 1 {
+		param_value := signature.items[i + 1]
+
+		param_object, param_is_object := param_value.(^Object)
+		if !param_is_object || param_object.kind != .SYMBOL {
+			compile_error("function parameter must be a name")
+			return
+		}
+
+		param := cast(^SymbolObject)param_object
+		if symbol_is_reserved_name(param) {
+			compile_error(fmt.tprintf("cannot use reserved name `%s` as parameter", param.text))
+			return
+		}
+
+		if param == name {
+			compile_error(fmt.tprintf("parameter `%s` duplicates function name", param.text))
+			return
+		}
+
+		for j := 0; j < i; j += 1 {
+			previous_object, _ := signature.items[j + 1].(^Object)
+			previous := cast(^SymbolObject)previous_object
+			if previous == param {
+				compile_error(fmt.tprintf("duplicate parameter `%s`", param.text))
+				return
+			}
+		}
+	}
+
+	binding_slot := claim_slot(builder)
+	if Compiler.failed { return }
+
+	// Recursive named def: publish the binding before compiling the body.
+	builder.local_bindings[builder.local_count] = LocalBinding{
+		symbol = name,
+		slot   = binding_slot,
+	}
+	builder.local_count += 1
+
+	child := begin_code(builder, param_count)
+
+	for i := 0; i < param_count; i += 1 {
+		param_object, _ := signature.items[i + 1].(^Object)
+		param := cast(^SymbolObject)param_object
+
+		child.local_bindings[child.local_count] = LocalBinding{
+			symbol = param,
+			slot   = i,
+		}
+		child.local_count += 1
+	}
+
+	return_slot := claim_slot(&child)
+	if Compiler.failed {
+		delete_code_builder(&child)
+		return
+	}
+
+	compile_body(&child, def_list.items[2:], return_slot)
+	if Compiler.failed {
+		delete_code_builder(&child)
+		return
+	}
+
+	emit_return(&child, return_slot)
+
+	child_code := end_code(&child)
+
+	if len(builder.child_codes) > int(max(u16)) {
+		compile_error("too many function literals in one body")
+		delete_code(child_code)
+		return
+	}
+
+	append(&builder.child_codes, child_code)
+	child_index := len(builder.child_codes) - 1
+
+	emit_load_function(builder, binding_slot, child_index)
+}
+
+compile_def :: proc(builder: ^CodeBuilder, form: Value) {
+	object, _ := form.(^Object)
+	list := cast(^ListObject)object
+	if len(list.items) < 2 {
+		compile_error("`def` expects a binding")
+		return
+	}
+
+	binding_object, binding_is_object := list.items[1].(^Object)
+	if !binding_is_object {
+		compile_error("`def` binding must be a name or function signature")
+		return
+	}
+
+	if binding_object.kind == .SYMBOL {
+		compile_value_def(builder, list)
+		return
+	}
+
+	if binding_object.kind == .LIST {
+		compile_named_fn_def(builder, list, cast(^ListObject)binding_object)
+		return
+	}
+
+	compile_error("`def` binding must be a name or function signature")
 }
 
 // Definitions mutate the local environment and do not become the body result.
@@ -2119,8 +2249,6 @@ compile_builtin_opcode :: proc(builder: ^CodeBuilder, symbol: ^SymbolObject, arg
 	   symbol.text == "<=" ||
 	   symbol.text == ">" ||
 	   symbol.text == ">=" {
-		assert(len(args) == 2, "binary builtin opcode requires two arguments")
-
 		operand_base := builder.next_slot
 		reserve_slots_until(builder, operand_base + 2)
 		if Compiler.failed { return }
@@ -2152,8 +2280,6 @@ compile_builtin_opcode :: proc(builder: ^CodeBuilder, symbol: ^SymbolObject, arg
 
 	if symbol.text == "not" ||
 	   symbol.text == "len" {
-		assert(len(args) == 1, "unary builtin opcode requires one argument")
-
 		compile_expr(builder, args[0], dst)
 		if Compiler.failed { return }
 
@@ -2166,7 +2292,6 @@ compile_builtin_opcode :: proc(builder: ^CodeBuilder, symbol: ^SymbolObject, arg
 	}
 
 	if symbol.text == "push" {
-		assert(len(args) >= 2, "push opcode requires a vector and at least one value")
 		if len(args) > int(max(u8)) {
 			compile_error("`push` has too many arguments")
 			return
@@ -2192,8 +2317,6 @@ compile_builtin_opcode :: proc(builder: ^CodeBuilder, symbol: ^SymbolObject, arg
 	}
 
 	if symbol.text == "pop" {
-		assert(len(args) == 1, "pop opcode requires one argument")
-
 		compile_expr(builder, args[0], dst)
 		if Compiler.failed { return }
 
@@ -2222,35 +2345,34 @@ compile_fn :: proc(parent: ^CodeBuilder, list: ^ListObject, dst: int) {
 		return
 	}
 
-	child := begin_code(parent, len(params.items))
-
 	for i := 0; i < len(params.items); i += 1 {
 		param_object, param_is_object := params.items[i].(^Object)
 		if !param_is_object || param_object.kind != .SYMBOL {
 			compile_error("function parameter must be a name")
-			delete_code_builder(&child)
 			return
 		}
 
 		param := cast(^SymbolObject)param_object
 		if symbol_is_reserved_name(param) {
 			compile_error(fmt.tprintf("cannot use reserved name `%s` as parameter", param.text))
-			delete_code_builder(&child)
 			return
 		}
 
 		for j := 0; j < i; j += 1 {
-			previous_object := params.items[j].(^Object)
-			assert(previous_object.kind == .SYMBOL, "previous parameter was already validated")
-
+			previous_object, _ := params.items[j].(^Object)
 			previous := cast(^SymbolObject)previous_object
 			if previous == param {
 				compile_error(fmt.tprintf("duplicate parameter `%s`", param.text))
-				delete_code_builder(&child)
 				return
 			}
 		}
+	}
 
+	child := begin_code(parent, len(params.items))
+
+	for i := 0; i < len(params.items); i += 1 {
+		param_object, _ := params.items[i].(^Object)
+		param := cast(^SymbolObject)param_object
 		child.local_bindings[child.local_count] = LocalBinding{
 			symbol = param,
 			slot   = i,
@@ -2935,27 +3057,22 @@ core_pop :: proc(vector_value: Value) -> Value {
 
 // Native builtins ================================================================================
 
-// (+ a b ...) -> int|float|string ; sum of numbers or string concatenation
 native_add :: proc(vm: ^VM, args: []Value) -> Value {
 	return core_add(args)
 }
 
-// (- a b ...) -> int|float ; subtract
 native_sub :: proc(vm: ^VM, args: []Value) -> Value {
 	return core_sub(args)
 }
 
-// (* a b ...) -> int|float ; multiply
 native_mul :: proc(vm: ^VM, args: []Value) -> Value {
 	return core_mul(args)
 }
 
-// (/ a b ...) -> float ; divide
 native_div :: proc(vm: ^VM, args: []Value) -> Value {
 	return core_div(args)
 }
 
-// (% a b) -> int|float ; floor modulo
 native_mod :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 2 {
 		runtime_error("% expects two arguments")
@@ -2964,7 +3081,6 @@ native_mod :: proc(vm: ^VM, args: []Value) -> Value {
 	return core_mod(args[0], args[1])
 }
 
-// (= a b) -> bool ; equality
 native_equal :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 2 {
 		runtime_error("= expects two arguments")
@@ -2973,7 +3089,6 @@ native_equal :: proc(vm: ^VM, args: []Value) -> Value {
 	return core_equal(args[0], args[1])
 }
 
-// (!= a b) -> bool ; inequality
 native_not_equal :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 2 {
 		runtime_error("!= expects two arguments")
@@ -2982,7 +3097,6 @@ native_not_equal :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(bool(!values_equal(args[0], args[1])))
 }
 
-// (< a b) -> bool ; less than
 native_less :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 2 {
 		runtime_error("< expects two arguments")
@@ -2991,7 +3105,6 @@ native_less :: proc(vm: ^VM, args: []Value) -> Value {
 	return core_less(args[0], args[1])
 }
 
-// (<= a b) -> bool ; less or equal
 native_less_equal :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 2 {
 		runtime_error("<= expects two arguments")
@@ -3000,7 +3113,6 @@ native_less_equal :: proc(vm: ^VM, args: []Value) -> Value {
 	return core_less_equal(args[0], args[1])
 }
 
-// (> a b) -> bool ; greater than
 native_greater :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 2 {
 		runtime_error("> expects two arguments")
@@ -3009,7 +3121,6 @@ native_greater :: proc(vm: ^VM, args: []Value) -> Value {
 	return core_greater(args[0], args[1])
 }
 
-// (>= a b) -> bool ; greater or equal
 native_greater_equal :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 2 {
 		runtime_error(">= expects two arguments")
@@ -3018,7 +3129,6 @@ native_greater_equal :: proc(vm: ^VM, args: []Value) -> Value {
 	return core_greater_equal(args[0], args[1])
 }
 
-// (not a) -> bool ; logical not
 native_not :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("not expects one argument")
@@ -3027,7 +3137,6 @@ native_not :: proc(vm: ^VM, args: []Value) -> Value {
 	return core_not(args[0])
 }
 
-// (nil? a) -> bool ; nil check
 native_nil_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("nil? expects one argument")
@@ -3036,7 +3145,6 @@ native_nil_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(bool(args[0] == nil))
 }
 
-// (bool? a) -> bool ; bool check
 native_bool_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("bool? expects one argument")
@@ -3046,7 +3154,6 @@ native_bool_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(bool(is_bool))
 }
 
-// (num? a) -> bool ; number check (int or float)
 native_number_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("num? expects one argument")
@@ -3057,7 +3164,6 @@ native_number_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(bool(is_int || is_float))
 }
 
-// (int? a) -> bool ; int check
 native_int_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("int? expects one argument")
@@ -3067,7 +3173,6 @@ native_int_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(bool(is_int))
 }
 
-// (float? a) -> bool ; float check
 native_float_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("float? expects one argument")
@@ -3077,7 +3182,6 @@ native_float_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(bool(is_float))
 }
 
-// (str? a) -> bool ; string check
 native_string_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("str? expects one argument")
@@ -3087,7 +3191,6 @@ native_string_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(bool(is_object && object.kind == .STRING))
 }
 
-// (vec? a) -> bool ; vector check
 native_vector_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("vec? expects one argument")
@@ -3097,7 +3200,6 @@ native_vector_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(bool(is_object && object.kind == .VECTOR))
 }
 
-// (map? a) -> bool ; map check
 native_map_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("map? expects one argument")
@@ -3107,7 +3209,6 @@ native_map_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(bool(is_object && object.kind == .MAP))
 }
 
-// (fn? a) -> bool ; function check
 native_function_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("fn? expects one argument")
@@ -3117,7 +3218,6 @@ native_function_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(bool(is_object && (object.kind == .NATIVE_FUNCTION || object.kind == .FUNCTION)))
 }
 
-// (len a) -> int ; length of string, vector, or map
 native_len :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("len expects one argument")
@@ -3126,7 +3226,6 @@ native_len :: proc(vm: ^VM, args: []Value) -> Value {
 	return core_len(args[0])
 }
 
-// (copy a) -> vector|map ; shallow copy
 native_copy :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("copy expects one argument")
@@ -3170,7 +3269,6 @@ native_copy :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value{}
 }
 
-// (clear a) -> vector|map ; remove all entries
 native_clear :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("clear expects one argument")
@@ -3206,7 +3304,6 @@ native_clear :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value{}
 }
 
-// (type a) -> string ; type name
 native_type :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("type expects one argument")
@@ -3248,7 +3345,6 @@ native_type :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(cast(^Object)new_string_object(type_name))
 }
 
-// (assert cond) or (assert cond msg) -> nil ; fail if condition is falsey
 native_assert :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) < 1 || len(args) > 2 {
 		runtime_error("assert expects a condition and optional message")
@@ -3268,7 +3364,6 @@ native_assert :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value{}
 }
 
-// (error msg) -> nil ; end the run with a diagnostic
 native_error :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("error expects one argument")
@@ -3281,7 +3376,6 @@ native_error :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value{}
 }
 
-// (push v val ...) -> vector ; append values
 native_push :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) < 2 {
 		runtime_error("push expects a vector and one or more values")
@@ -3297,7 +3391,6 @@ native_push :: proc(vm: ^VM, args: []Value) -> Value {
 	return vector_value
 }
 
-// (pop v) -> value ; remove and return last element
 native_pop :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("pop expects one argument")
@@ -3307,7 +3400,6 @@ native_pop :: proc(vm: ^VM, args: []Value) -> Value {
 	return core_pop(args[0])
 }
 
-// (insert v idx val) -> vector ; insert at index, shift right
 native_insert :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 3 {
 		runtime_error("insert expects a vector, index, and value")
@@ -3336,7 +3428,6 @@ native_insert :: proc(vm: ^VM, args: []Value) -> Value {
 	return args[0]
 }
 
-// (remove v idx) -> value ; remove at index, shift left
 native_remove :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 2 {
 		runtime_error("remove expects a vector and index")
@@ -3366,7 +3457,6 @@ native_remove :: proc(vm: ^VM, args: []Value) -> Value {
 	return result
 }
 
-// (slice v start count) -> vector ; fresh sub-vector
 native_slice :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 3 {
 		runtime_error("slice expects a vector, start, and count")
@@ -3402,7 +3492,6 @@ native_slice :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(cast(^Object)new_vector_object(items))
 }
 
-// (keys m) -> vector ; map keys
 native_keys :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("keys expects one argument")
@@ -3428,7 +3517,6 @@ native_keys :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(cast(^Object)new_vector_object(items))
 }
 
-// (vals m) -> vector ; map values
 native_vals :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("vals expects one argument")
@@ -3454,7 +3542,6 @@ native_vals :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(cast(^Object)new_vector_object(items))
 }
 
-// (pairs m) -> vector ; key-value pair vectors
 native_pairs :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("pairs expects one argument")
@@ -3485,7 +3572,6 @@ native_pairs :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(cast(^Object)new_vector_object(items))
 }
 
-// (merge a b ...) -> map ; merge maps, later entries replace earlier
 native_merge :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) < 2 {
 		runtime_error("merge expects two or more maps")
@@ -3521,7 +3607,6 @@ native_merge :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(cast(^Object)result)
 }
 
-// (print ...) -> nil ; display values separated by spaces, with newline
 native_print :: proc(vm: ^VM, args: []Value) -> Value {
 	for i := 0; i < len(args); i += 1 {
 		if i > 0 {
@@ -3533,7 +3618,6 @@ native_print :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value{}
 }
 
-// (write ...) -> nil ; display values without separator or newline
 native_write :: proc(vm: ^VM, args: []Value) -> Value {
 	for value in args {
 		print_value(value)
@@ -4011,10 +4095,6 @@ run_source :: proc(source: string) -> Value {
 	forms := read_source(source)
 	if Reader.failed { return Value{} }
 	defer delete(forms)
-
-	// TEMP: dump source tree on every run
-	//debug_print_source_tree(forms)
-	//fmt.println()
 
 	code := compile_forms(forms[:])
 	if Compiler.failed { return Value{} }

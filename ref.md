@@ -1,8 +1,8 @@
 # Rite Language Reference
 
-This document describes the intended core surface of Rite.
+This document describes the current core surface of Rite.
 
-Rite is a small eager Lisp with s-expression syntax, lexical scope, mutable bindings, immutable lists, mutable vectorss, maps, and first-class functions.
+Rite is a small eager Lisp with s-expression syntax, lexical scope, mutable bindings, mutable vectors, maps, and first-class functions.
 
 ## Source Shape
 
@@ -21,7 +21,7 @@ A file may contain only definitions.
 (def y 20)
 ```
 
-A file may be empty. File evaluation does not require a final expression result.
+A file may be empty. File evaluation returns the last expression result, or `nil` if the file contains no expression forms.
 
 Newlines are whitespace.
 
@@ -103,7 +103,6 @@ bool
 int
 float
 string
-list
 vector
 map
 function
@@ -115,8 +114,6 @@ function
 
 `nil` is distinct from `false`.
 
-`nil` is distinct from the empty list.
-
 ### Truthiness
 
 Only `nil` and `false` are falsey.
@@ -126,7 +123,6 @@ Every other value is truthy, including:
 ```text
 0
 ""
-empty list values
 []
 {}
 ```
@@ -186,9 +182,9 @@ A body form is either a definition or an expression.
 
 An empty body returns `nil`.
 
-A non-empty body must end with an expression. The body returns that expression's value.
+A definition mutates the local environment and does not become the body result.
 
-Definitions may appear earlier in the body.
+The last expression result wins. If a body has no expression forms, it returns `nil`.
 
 ```clojure
 (do)
@@ -210,15 +206,13 @@ Definitions may appear earlier in the body.
 ; 11
 ```
 
-A non-empty body cannot end with a definition.
-
 ```clojure
 (do
   (def x 10))
-; error
+; nil
 ```
 
-File top level is program-like. A file may be empty, may contain only definitions, and may end with a definition.
+File top level uses the same rule. The file result is the last expression result, or `nil` if there is no expression form.
 
 ## Names and Scope
 
@@ -302,7 +296,7 @@ x
 ; 10
 ```
 
-Because `def` is not an expression, it cannot be used as an argument, branch, vector element, initializer, or final body result.
+Because `def` is not an expression, it cannot be used as an argument, branch, vector element, or initializer.
 
 ```clojure
 (def x (def y 10))
@@ -335,13 +329,17 @@ It defines `name` as a function in the current scope.
 ; 11
 ```
 
-It has the same user-visible meaning as defining the name with `fn`.
+It is a recursive function binding form.
+
+It is not equivalent to ordinary value definition with `fn`.
 
 ```clojure
 (def inc
   (fn (x)
     (+ x 1)))
 ```
+
+The ordinary value definition above is non-recursive. The named function definition binds its name before compiling the function body, so the function may call itself.
 
 The function body follows normal body rules.
 
@@ -366,6 +364,25 @@ Named functions may call themselves recursively.
 
 (fact 5)
 ; 120
+```
+
+Ordinary value definition with `fn` stays ordered and non-recursive.
+
+```clojure
+(def fact
+  (fn (n)
+    (fact (- n 1))))
+; error
+```
+
+Duplicate parameter names are errors.
+
+A parameter may not have the same name as the function.
+
+```clojure
+(def (f f)
+  f)
+; error
 ```
 
 Named function definitions follow normal definition rules. They are valid only at file top level or directly inside a body, are not expressions, and duplicate same-scope definitions are errors.
@@ -604,14 +621,6 @@ x
 ; error
 ```
 
-A non-empty `do` body must end with an expression.
-
-```clojure
-(do
-  (def x 10))
-; error
-```
-
 ### If
 
 ```clojure
@@ -713,14 +722,6 @@ Outer bindings may be mutated with `set`.
 ; returns nil
 ```
 
-A non-empty `while` body must end with an expression.
-
-```clojure
-(while cond
-  (def x 10))
-; error
-```
-
 ### Fn
 
 ```clojure
@@ -751,6 +752,13 @@ An empty function body returns `nil` when called.
 
 ```clojure
 (fn ())
+```
+
+A defs-only function body also returns `nil` when called.
+
+```clojure
+(fn ()
+  (def x 1))
 ```
 
 Function parameters have fixed arity.
@@ -829,7 +837,9 @@ Built-in names may still be shadowed by mutable bindings.
 ; error
 ```
 
-Built-in names may still be shadowed by mutable bindings.
+Rite source code does not currently define a form that creates mutable global
+bindings. Mutable globals are reserved for host-installed bindings and future
+global-definition forms.
 
 ```clojure
 (def print (fn (value) nil))
@@ -985,7 +995,7 @@ Map key equality follows Rite equality:
 bools compare by value
 numbers compare by numeric value
 strings compare by contents
-lists, vectors, maps, and functions compare by identity
+vectors, maps, and functions compare by identity
 ```
 
 Maps cannot store `nil`. Assigning `nil` deletes the entry, and looking up a
@@ -993,13 +1003,11 @@ missing key returns `nil`.
 
 Map display order is unspecified.
 
-### Lists
+### Source Lists
 
-Lists are immutable runtime values.
+Parenthesized source lists are the surface shape of Rite forms.
 
-Source lists are the surface shape of Rite forms, not runtime list literals.
-
-Lists may contain any Rite value, including `nil`.
+Rite currently has no runtime list literal.
 
 ### Numbers
 
@@ -1394,7 +1402,6 @@ bool     -> "bool"
 int      -> "int"
 float    -> "float"
 string   -> "string"
-list     -> "list"
 vector   -> "vector"
 map      -> "map"
 function -> "function"
@@ -1528,7 +1535,6 @@ nil equals nil.
 bools compare by value.
 numbers compare by numeric value.
 strings compare by contents.
-lists compare by identity.
 vectors compare by identity.
 maps compare by identity.
 functions compare by identity.
@@ -1641,7 +1647,6 @@ nil       -> nil
 true      -> true
 false     -> false
 strings   -> their text without quotes
-lists     -> parenthesized values
 vectors   -> bracketed values
 maps      -> braced key/value pairs
 functions -> <function>

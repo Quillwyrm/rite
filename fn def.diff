@@ -1,0 +1,181 @@
+diff --git a/rite.exe b/rite.exe
+index ec6d14e..1c425ea 100644
+Binary files a/rite.exe and b/rite.exe differ
+diff --git a/src/rite/rite.odin b/src/rite/rite.odin
+index acc8756..a9f10ad 100644
+--- a/src/rite/rite.odin
++++ b/src/rite/rite.odin
+@@ -1802,21 +1802,14 @@ compile_map_expr :: proc(builder: ^CodeBuilder, map_object: ^MapObject, dst: int
+ 	}
+ }
+ 
+-compile_def :: proc(builder: ^CodeBuilder, form: Value) {
+-	object, is_object := form.(^Object)
+-	assert(is_object && object.kind == .LIST, "compile_def expected list form")
+-
+-	list := cast(^ListObject)object
++compile_value_def :: proc(builder: ^CodeBuilder, list: ^ListObject) {
+ 	if len(list.items) != 3 {
+-		compile_error("`def` expects a name and value")
++		compile_error("value `def` expects a name and value")
+ 		return
+ 	}
+ 
+ 	name_object, name_is_object := list.items[1].(^Object)
+-	if !name_is_object || name_object.kind != .SYMBOL {
+-		compile_error("`def` name must be a name")
+-		return
+-	}
++	assert(name_is_object && name_object.kind == .SYMBOL, "compile_value_def expected symbol binding")
+ 
+ 	name := cast(^SymbolObject)name_object
+ 	if symbol_is_reserved_name(name) {
+@@ -1845,6 +1838,148 @@ compile_def :: proc(builder: ^CodeBuilder, form: Value) {
+ 	builder.local_count += 1
+ }
+ 
++compile_named_fn_def :: proc(builder: ^CodeBuilder, def_list: ^ListObject, signature: ^ListObject) {
++	if len(signature.items) == 0 {
++		compile_error("function `def` signature must start with a name")
++		return
++	}
++
++	name_object, name_is_object := signature.items[0].(^Object)
++	if !name_is_object || name_object.kind != .SYMBOL {
++		compile_error("function `def` name must be a name")
++		return
++	}
++
++	name := cast(^SymbolObject)name_object
++	if symbol_is_reserved_name(name) {
++		compile_error(fmt.tprintf("cannot define reserved name `%s`", name.text))
++		return
++	}
++
++	for i := builder.current_scope_local_start; i < builder.local_count; i += 1 {
++		if builder.local_bindings[i].symbol == name {
++			compile_error(fmt.tprintf("duplicate definition `%s` in the same scope", name.text))
++			return
++		}
++	}
++
++	param_count := len(signature.items) - 1
++	if param_count > int(max(u8)) {
++		compile_error("function has too many parameters")
++		return
++	}
++
++	binding_slot := claim_slot(builder)
++	if Compiler.failed { return }
++
++	// Recursive named def: publish the binding before compiling the body.
++	builder.local_bindings[builder.local_count] = LocalBinding{
++		symbol = name,
++		slot   = binding_slot,
++	}
++	builder.local_count += 1
++
++	child := begin_code(builder, param_count)
++
++	for i := 0; i < param_count; i += 1 {
++		param_value := signature.items[i + 1]
++
++		param_object, param_is_object := param_value.(^Object)
++		if !param_is_object || param_object.kind != .SYMBOL {
++			compile_error("function parameter must be a name")
++			delete_code_builder(&child)
++			return
++		}
++
++		param := cast(^SymbolObject)param_object
++		if symbol_is_reserved_name(param) {
++			compile_error(fmt.tprintf("cannot use reserved name `%s` as parameter", param.text))
++			delete_code_builder(&child)
++			return
++		}
++
++		if param == name {
++			compile_error(fmt.tprintf("parameter `%s` duplicates function name", param.text))
++			delete_code_builder(&child)
++			return
++		}
++
++		for j := 0; j < i; j += 1 {
++			previous_object := signature.items[j + 1].(^Object)
++			assert(previous_object.kind == .SYMBOL, "previous parameter was already validated")
++
++			previous := cast(^SymbolObject)previous_object
++			if previous == param {
++				compile_error(fmt.tprintf("duplicate parameter `%s`", param.text))
++				delete_code_builder(&child)
++				return
++			}
++		}
++
++		child.local_bindings[child.local_count] = LocalBinding{
++			symbol = param,
++			slot   = i,
++		}
++		child.local_count += 1
++	}
++
++	return_slot := claim_slot(&child)
++	if Compiler.failed {
++		delete_code_builder(&child)
++		return
++	}
++
++	compile_body(&child, def_list.items[2:], return_slot)
++	if Compiler.failed {
++		delete_code_builder(&child)
++		return
++	}
++
++	emit_return(&child, return_slot)
++
++	child_code := end_code(&child)
++
++	if len(builder.child_codes) > int(max(u16)) {
++		compile_error("too many function literals in one body")
++		delete_code(child_code)
++		return
++	}
++
++	append(&builder.child_codes, child_code)
++	child_index := len(builder.child_codes) - 1
++
++	emit_load_function(builder, binding_slot, child_index)
++}
++
++compile_def :: proc(builder: ^CodeBuilder, form: Value) {
++	object, is_object := form.(^Object)
++	assert(is_object && object.kind == .LIST, "compile_def expected list form")
++
++	list := cast(^ListObject)object
++	if len(list.items) < 2 {
++		compile_error("`def` expects a binding")
++		return
++	}
++
++	binding_object, binding_is_object := list.items[1].(^Object)
++	if !binding_is_object {
++		compile_error("`def` binding must be a name or function signature")
++		return
++	}
++
++	if binding_object.kind == .SYMBOL {
++		compile_value_def(builder, list)
++		return
++	}
++
++	if binding_object.kind == .LIST {
++		compile_named_fn_def(builder, list, cast(^ListObject)binding_object)
++		return
++	}
++
++	compile_error("`def` binding must be a name or function signature")
++}
++
+ // Definitions mutate the local environment and do not become the body result.
+ // The last expression result wins; defs-only and empty bodies return nil.
+ compile_body :: proc(builder: ^CodeBuilder, forms: []Value, dst: int) {
