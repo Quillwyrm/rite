@@ -1,5 +1,8 @@
 ; Rite smoke
 ; A readable tour of the current semantic surface. Not a test suite.
+(import mod "module-smoke")
+(import "module-smoke")
+
 (def nl print)
 
 (write "\n")
@@ -241,6 +244,29 @@
       (* n (fact (- n 1))))))
 
 (out (fact 5))
+
+
+(nl)
+(print "== modules ==")
+(nl)
+
+(out [mod/exported-number
+      (mod/square 6)
+      ((mod/make-adder 5) 7)
+      (module-smoke/square 3)])
+
+(out [mod/module-counter
+      (mod/next)
+      (mod/next)])
+
+(set mod/module-counter 100)
+
+(out [mod/module-counter
+      (mod/next)])
+
+(out mod/exported-vector)
+(push mod/exported-vector 3)
+(out mod/exported-vector)
 
 
 (nl)

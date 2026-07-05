@@ -8,6 +8,10 @@ Rite is a small eager Lisp with s-expression syntax, lexical scope, mutable bind
 
 A Rite file is a sequence of top-level forms evaluated in order.
 
+Import forms, if present, must appear before other top-level forms.
+
+An export form, if present, must be the final top-level form.
+
 ```clojure
 (def x 10)
 (print x)
@@ -46,6 +50,7 @@ player-name
 +
 <=
 foo.1
+math/square
 ```
 
 `:` is a delimiter and begins a name string.
@@ -74,7 +79,7 @@ false
 
 They produce literal values and cannot be used as binding names.
 
-Special form names have fixed language meaning:
+Reserved form names have fixed language meaning:
 
 ```text
 def
@@ -83,9 +88,11 @@ do
 if
 while
 fn
+import
+export
 ```
 
-Special form names are reserved and cannot be used as binding names.
+These names are reserved and cannot be used as binding names.
 
 Built-in functions are immutable global function bindings supplied by Rite.
 
@@ -129,12 +136,15 @@ Every other value is truthy, including:
 
 ## Forms
 
-Rite source has two form categories:
+Rite source has three form categories:
 
 ```text
+root declarations
 definitions
 expressions
 ```
+
+A root declaration controls file loading or file exports. Root declarations are valid only at file top level.
 
 A definition creates a binding at file top level or in the current body.
 
@@ -232,6 +242,8 @@ A child scope may define a name that shadows an outer binding.
 
 A file-scope definition may shadow a global binding, including a built-in function.
 
+A module import creates qualified file-scope bindings.
+
 A duplicate definition for the same name in the same scope is an error.
 
 Bindings are ordered. A binding is visible only after its definition has been evaluated.
@@ -252,6 +264,139 @@ Bindings are ordered. A binding is visible only after its definition has been ev
 ```
 
 A name lookup is an error if no visible binding exists.
+
+## Modules
+
+A module is a Rite source file loaded through `import`.
+
+```clojure
+(import "math")
+(import m "math")
+```
+
+`import` is a root declaration.
+
+Import forms must appear before other top-level forms.
+
+```clojure
+(import "math")
+
+(def radius 10)
+(math/area radius)
+```
+
+The path must be a string.
+
+If the path has no extension, Rite appends `.rite`.
+
+Relative import paths are resolved relative to the importing file.
+
+Source evaluated without a file path resolves relative imports from the current working directory.
+
+The default import namespace is the imported path's file stem.
+
+```clojure
+(import "math")
+
+(math/square 4)
+```
+
+An explicit namespace may be supplied.
+
+```clojure
+(import m "math")
+
+(m/square 4)
+```
+
+Imported names are ordinary Rite names containing `/`.
+
+`math/square` is not field access, map lookup, or namespace lookup syntax.
+
+An import creates file-scope bindings for the module's exports.
+
+```clojure
+; math.rite
+(def pi 3.14159)
+
+(def (square x)
+  (* x x))
+
+(export)
+```
+
+```clojure
+; main.rite
+(import "math")
+
+(math/square 4)
+math/pi
+```
+
+A module is loaded and evaluated at most once per run for the same resolved file path.
+
+Cyclic imports are an error.
+
+Modules may import other modules.
+
+```clojure
+; shapes.rite
+(import math "math")
+
+(def (square-area x)
+  (math/square x))
+
+(export)
+```
+
+Imported bindings copy the exported values.
+
+Setting an imported mutable binding mutates the importing file's binding. It does not mutate the original module export.
+
+Mutable heap values such as vectors and maps follow normal value behavior. If an exported vector or map value is imported, mutating that object mutates the shared object.
+
+### Exports
+
+```clojure
+(export)
+(export name...)
+```
+
+`export` is a root declaration.
+
+If present, it must be the final top-level form.
+
+`export` marks file-scope bindings from the current file as module exports.
+
+With no names, `export` exports all file-scope bindings defined by the current file.
+
+```clojure
+(def pi 3.14159)
+
+(def (square x)
+  (* x x))
+
+(export)
+```
+
+With names, `export` exports only those file-scope bindings.
+
+```clojure
+(def pi 3.14159)
+
+(def (square x)
+  (* x x))
+
+(export square)
+```
+
+`export` does not export imported bindings or built-in functions.
+
+Exporting a name that is not a file-scope binding from the current file is an error.
+
+A duplicate export name is an error.
+
+A file with no export form exports nothing.
 
 ## Definitions
 

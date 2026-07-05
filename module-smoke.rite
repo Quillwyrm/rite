@@ -1,0 +1,25 @@
+; Module smoke dependency.
+
+(def exported-number 41)
+(def exported-vector [1 2])
+
+(def (square x)
+  (* x x))
+
+(def (make-adder n)
+  (fn (x)
+    (+ x n)))
+
+(def module-counter 0)
+
+(def (next)
+  (set module-counter (+ module-counter 1))
+  module-counter)
+
+(export
+    exported-number
+    exported-vector
+    square
+    make-adder
+    next
+    module-counter)
