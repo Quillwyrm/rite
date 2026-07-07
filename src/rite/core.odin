@@ -1,5 +1,6 @@
 package rite
 
+import "base:intrinsics"
 import "core:fmt"
 import "core:io"
 import "core:math"
@@ -52,38 +53,126 @@ bind_native_builtin :: proc(vm: ^VM, name: string, native: NativeProc) -> int {
 // Operation semantics =============================================================================
 
 // Numeric +, -, and * stay int while all operands are ints.
-// + concatenates display text when any operand is a string; / always returns float.
+// Int +, -, and * wrap in i64 range.
+// / always returns float.
+
+op_add_binary :: proc(lhs, rhs: Value) -> Value {
+	lhs_int, lhs_is_int := lhs.(i64)
+	rhs_int, rhs_is_int := rhs.(i64)
+	if lhs_is_int && rhs_is_int {
+		result, _ := intrinsics.overflow_add(lhs_int, rhs_int)
+		return Value(result)
+	}
+
+	lhs_float, lhs_is_float := lhs.(f64)
+	if lhs_is_int {
+		lhs_float = f64(lhs_int)
+	} else if !lhs_is_float {
+		runtime_error("+ expects numbers")
+		return Value{}
+	}
+
+	rhs_float, rhs_is_float := rhs.(f64)
+	if rhs_is_int {
+		rhs_float = f64(rhs_int)
+	} else if !rhs_is_float {
+		runtime_error("+ expects numbers")
+		return Value{}
+	}
+
+	return Value(lhs_float + rhs_float)
+}
+
+op_sub_binary :: proc(lhs, rhs: Value) -> Value {
+	lhs_int, lhs_is_int := lhs.(i64)
+	rhs_int, rhs_is_int := rhs.(i64)
+	if lhs_is_int && rhs_is_int {
+		result, _ := intrinsics.overflow_sub(lhs_int, rhs_int)
+		return Value(result)
+	}
+
+	lhs_float, lhs_is_float := lhs.(f64)
+	if lhs_is_int {
+		lhs_float = f64(lhs_int)
+	} else if !lhs_is_float {
+		runtime_error("- expects numbers")
+		return Value{}
+	}
+
+	rhs_float, rhs_is_float := rhs.(f64)
+	if rhs_is_int {
+		rhs_float = f64(rhs_int)
+	} else if !rhs_is_float {
+		runtime_error("- expects numbers")
+		return Value{}
+	}
+
+	return Value(lhs_float - rhs_float)
+}
+
+op_mul_binary :: proc(lhs, rhs: Value) -> Value {
+	lhs_int, lhs_is_int := lhs.(i64)
+	rhs_int, rhs_is_int := rhs.(i64)
+	if lhs_is_int && rhs_is_int {
+		result, _ := intrinsics.overflow_mul(lhs_int, rhs_int)
+		return Value(result)
+	}
+
+	lhs_float, lhs_is_float := lhs.(f64)
+	if lhs_is_int {
+		lhs_float = f64(lhs_int)
+	} else if !lhs_is_float {
+		runtime_error("* expects numbers")
+		return Value{}
+	}
+
+	rhs_float, rhs_is_float := rhs.(f64)
+	if rhs_is_int {
+		rhs_float = f64(rhs_int)
+	} else if !rhs_is_float {
+		runtime_error("* expects numbers")
+		return Value{}
+	}
+
+	return Value(lhs_float * rhs_float)
+}
+
+op_div_binary :: proc(lhs, rhs: Value) -> Value {
+	lhs_int, lhs_is_int := lhs.(i64)
+	lhs_float, lhs_is_float := lhs.(f64)
+	if lhs_is_int {
+		lhs_float = f64(lhs_int)
+	} else if !lhs_is_float {
+		runtime_error("/ expects numbers")
+		return Value{}
+	}
+
+	rhs_int, rhs_is_int := rhs.(i64)
+	rhs_float, rhs_is_float := rhs.(f64)
+	if rhs_is_int {
+		if rhs_int == 0 {
+			runtime_error("/ divisor cannot be zero")
+			return Value{}
+		}
+
+		rhs_float = f64(rhs_int)
+	} else if rhs_is_float {
+		if rhs_float == 0 {
+			runtime_error("/ divisor cannot be zero")
+			return Value{}
+		}
+	} else {
+		runtime_error("/ expects numbers")
+		return Value{}
+	}
+
+	return Value(lhs_float / rhs_float)
+}
 
 op_add :: proc(args: []Value) -> Value {
 	if len(args) < 2 {
 		runtime_error("+ expects two or more arguments")
 		return Value{}
-	}
-
-	saw_string := false
-	for arg in args {
-		object, is_object := arg.(^Object)
-		if is_object && object.kind == .STRING {
-			saw_string = true
-			break
-		}
-	}
-
-	if saw_string {
-		parts := make([dynamic]string)
-		parents := make([dynamic]^Object)
-
-		for arg in args {
-			append_value_text(&parts, arg, &parents)
-		}
-
-		text := strings.concatenate(parts[:])
-		result := Value(cast(^Object)new_string_object(text))
-
-		delete(text)
-		delete(parts)
-		delete(parents)
-		return result
 	}
 
 	all_int := true
@@ -94,12 +183,7 @@ op_add :: proc(args: []Value) -> Value {
 		int_value, is_int := arg.(i64)
 		if is_int {
 			if all_int {
-				next_result := i128(int_result) + i128(int_value)
-				if next_result < i128(min(i64)) || next_result > i128(max(i64)) {
-					runtime_error("+ integer overflow")
-					return Value{}
-				}
-				int_result = i64(next_result)
+				int_result, _ = intrinsics.overflow_add(int_result, int_value)
 			} else {
 				float_result += f64(int_value)
 			}
@@ -145,12 +229,7 @@ op_sub :: proc(args: []Value) -> Value {
 		int_value, is_int := args[i].(i64)
 		if is_int {
 			if all_int {
-				next_result := i128(int_result) - i128(int_value)
-				if next_result < i128(min(i64)) || next_result > i128(max(i64)) {
-					runtime_error("- integer overflow")
-					return Value{}
-				}
-				int_result = i64(next_result)
+				int_result, _ = intrinsics.overflow_sub(int_result, int_value)
 			} else {
 				float_result -= f64(int_value)
 			}
@@ -191,12 +270,7 @@ op_mul :: proc(args: []Value) -> Value {
 		int_value, is_int := arg.(i64)
 		if is_int {
 			if all_int {
-				next_result := i128(int_result) * i128(int_value)
-				if next_result < i128(min(i64)) || next_result > i128(max(i64)) {
-					runtime_error("* integer overflow")
-					return Value{}
-				}
-				int_result = i64(next_result)
+				int_result, _ = intrinsics.overflow_mul(int_result, int_value)
 			} else {
 				float_result *= f64(int_value)
 			}
@@ -345,6 +419,10 @@ values_equal :: proc(lhs, rhs: Value) -> bool {
 		return false
 	}
 
+	if left_object == right_object {
+		return true
+	}
+
 	if left_object.kind == .STRING {
 		left_string := cast(^StringObject)left_object
 		right_string := cast(^StringObject)right_object
@@ -358,108 +436,76 @@ op_equal :: proc(lhs, rhs: Value) -> Value {
 	return Value(bool(values_equal(lhs, rhs)))
 }
 
-op_less :: proc(lhs, rhs: Value) -> Value {
-	left_int, left_is_int := lhs.(i64)
-	right_int, right_is_int := rhs.(i64)
-	if left_is_int && right_is_int {
-		return Value(bool(left_int < right_int))
-	}
-
-	left_float, left_is_float := lhs.(f64)
-	if left_is_int {
-		left_float = f64(left_int)
-	} else if !left_is_float {
-		runtime_error("< expects numbers")
-		return Value{}
-	}
-
-	right_float, right_is_float := rhs.(f64)
-	if right_is_int {
-		right_float = f64(right_int)
-	} else if !right_is_float {
-		runtime_error("< expects numbers")
-		return Value{}
-	}
-
-	return Value(bool(left_float < right_float))
+NumericCompare :: enum u8 {
+	LESS,
+	LESS_EQUAL,
+	GREATER,
+	GREATER_EQUAL,
 }
 
-op_less_equal :: proc(lhs, rhs: Value) -> Value {
+compare_numbers :: proc(lhs, rhs: Value, compare: NumericCompare) -> bool {
 	left_int, left_is_int := lhs.(i64)
 	right_int, right_is_int := rhs.(i64)
 	if left_is_int && right_is_int {
-		return Value(bool(left_int <= right_int))
+		#partial switch compare {
+		case .LESS:
+			return left_int < right_int
+		case .LESS_EQUAL:
+			return left_int <= right_int
+		case .GREATER:
+			return left_int > right_int
+		case .GREATER_EQUAL:
+			return left_int >= right_int
+		}
 	}
 
 	left_float, left_is_float := lhs.(f64)
 	if left_is_int {
 		left_float = f64(left_int)
 	} else if !left_is_float {
-		runtime_error("<= expects numbers")
-		return Value{}
+		#partial switch compare {
+		case .LESS:
+			runtime_error("< expects numbers")
+		case .LESS_EQUAL:
+			runtime_error("<= expects numbers")
+		case .GREATER:
+			runtime_error("> expects numbers")
+		case .GREATER_EQUAL:
+			runtime_error(">= expects numbers")
+		}
+		return false
 	}
 
 	right_float, right_is_float := rhs.(f64)
 	if right_is_int {
 		right_float = f64(right_int)
 	} else if !right_is_float {
-		runtime_error("<= expects numbers")
-		return Value{}
+		#partial switch compare {
+		case .LESS:
+			runtime_error("< expects numbers")
+		case .LESS_EQUAL:
+			runtime_error("<= expects numbers")
+		case .GREATER:
+			runtime_error("> expects numbers")
+		case .GREATER_EQUAL:
+			runtime_error(">= expects numbers")
+		}
+		return false
 	}
 
-	return Value(bool(left_float <= right_float))
-}
-
-op_greater :: proc(lhs, rhs: Value) -> Value {
-	left_int, left_is_int := lhs.(i64)
-	right_int, right_is_int := rhs.(i64)
-	if left_is_int && right_is_int {
-		return Value(bool(left_int > right_int))
+	#partial switch compare {
+	case .LESS:
+		return left_float < right_float
+	case .LESS_EQUAL:
+		return left_float <= right_float
+	case .GREATER:
+		return left_float > right_float
+	case .GREATER_EQUAL:
+		return left_float >= right_float
 	}
 
-	left_float, left_is_float := lhs.(f64)
-	if left_is_int {
-		left_float = f64(left_int)
-	} else if !left_is_float {
-		runtime_error("> expects numbers")
-		return Value{}
-	}
-
-	right_float, right_is_float := rhs.(f64)
-	if right_is_int {
-		right_float = f64(right_int)
-	} else if !right_is_float {
-		runtime_error("> expects numbers")
-		return Value{}
-	}
-
-	return Value(bool(left_float > right_float))
-}
-
-op_greater_equal :: proc(lhs, rhs: Value) -> Value {
-	left_int, left_is_int := lhs.(i64)
-	right_int, right_is_int := rhs.(i64)
-	if left_is_int && right_is_int {
-		return Value(bool(left_int >= right_int))
-	}
-
-	left_float, left_is_float := lhs.(f64)
-	if left_is_int {
-		left_float = f64(left_int)
-	} else if !left_is_float {
-		runtime_error(">= expects numbers")
-		return Value{}
-	}
-
-	right_float, right_is_float := rhs.(f64)
-	if right_is_int {
-		right_float = f64(right_int)
-	} else if !right_is_float {
-		runtime_error(">= expects numbers")
-		return Value{}
-	}
-
-	return Value(bool(left_float >= right_float))
+	assert(false, "invalid numeric comparison")
+	return false
 }
 
 value_is_falsey :: proc(value: Value) -> bool {
@@ -549,7 +595,7 @@ require_int_arg :: proc(args: []Value, index: int, proc_name, arg_name: string) 
 
 // Native builtins ================================================================================
 
-// (+ value value...) number|string; Numeric sum, or display-text concatenation if any argument is a string.
+// (+ number number...) number; Numeric sum.
 native_add :: proc(vm: ^VM, args: []Value) -> Value {
 	return op_add(args)
 }
@@ -602,7 +648,7 @@ native_less :: proc(vm: ^VM, args: []Value) -> Value {
 		runtime_error("< expects two arguments")
 		return Value{}
 	}
-	return op_less(args[0], args[1])
+	return Value(bool(compare_numbers(args[0], args[1], .LESS)))
 }
 
 // (<= left right) bool; Numeric less-than-or-equal.
@@ -611,7 +657,7 @@ native_less_equal :: proc(vm: ^VM, args: []Value) -> Value {
 		runtime_error("<= expects two arguments")
 		return Value{}
 	}
-	return op_less_equal(args[0], args[1])
+	return Value(bool(compare_numbers(args[0], args[1], .LESS_EQUAL)))
 }
 
 // (> left right) bool; Numeric greater-than.
@@ -620,7 +666,7 @@ native_greater :: proc(vm: ^VM, args: []Value) -> Value {
 		runtime_error("> expects two arguments")
 		return Value{}
 	}
-	return op_greater(args[0], args[1])
+	return Value(bool(compare_numbers(args[0], args[1], .GREATER)))
 }
 
 // (>= left right) bool; Numeric greater-than-or-equal.
@@ -629,7 +675,7 @@ native_greater_equal :: proc(vm: ^VM, args: []Value) -> Value {
 		runtime_error(">= expects two arguments")
 		return Value{}
 	}
-	return op_greater_equal(args[0], args[1])
+	return Value(bool(compare_numbers(args[0], args[1], .GREATER_EQUAL)))
 }
 
 // (not value) bool; true if value is falsey.

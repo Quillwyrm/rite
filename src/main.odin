@@ -6,7 +6,6 @@ import "core:strings"
 import "rite"
 
 main :: proc() {
-
 	if len(os.args) == 3 && os.args[1] == "eval" {
 		vm := rite.make_vm()
 		rite.set_argv(&vm, os.args, 3)
@@ -22,9 +21,32 @@ main :: proc() {
 		return
 	}
 
+	if len(os.args) == 3 && os.args[1] == "dis" {
+		path_arg := os.args[2]
+		source_path := path_arg
+
+		if !os.exists(source_path) && !strings.has_suffix(path_arg, ".rite") {
+			source_path = fmt.tprintf("%s.rite", path_arg)
+		}
+
+		vm := rite.make_vm()
+		rite.set_argv(&vm, os.args, 3)
+
+		disassembly := rite.disassemble_file(&vm, source_path)
+		if vm.error_string != "" {
+			fmt.eprintln(vm.error_string)
+			os.exit(1)
+		}
+		defer delete(disassembly)
+
+		fmt.print(disassembly)
+		return
+	}
+
 	if len(os.args) != 2 {
 		fmt.eprintln("usage: rite <file>")
 		fmt.eprintln("         rite eval <string>")
+		fmt.eprintln("         rite dis <file>")
 		os.exit(1)
 	}
 
