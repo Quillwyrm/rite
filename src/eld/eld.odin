@@ -1,4 +1,4 @@
-package rite
+package eld
 
 import "base:intrinsics"
 import "core:fmt"
@@ -42,7 +42,7 @@ SymbolObject :: struct {
 ListObject :: struct {
 	header: Object,
 
-	// Reader lists hold source forms. Rite does not expose a runtime list literal.
+	// Reader lists hold source forms. Eld does not expose a runtime list literal.
 	items: [dynamic]Value,
 }
 
@@ -67,7 +67,7 @@ MapObject :: struct {
 	tombstone_count: int,
 }
 
-// The zero value of this union represents Rite nil.
+// The zero value of this union represents Eld nil.
 Value :: union {
 	bool,
 	i64,
@@ -432,7 +432,7 @@ string_hash :: proc(object: ^StringObject) -> u64 {
 	return object.hash
 }
 
-// Hashes one legal runtime map key. Numeric hashing mirrors Rite's current
+// Hashes one legal runtime map key. Numeric hashing mirrors Eld's current
 // mixed comparison rule by first converting ints to f64.
 map_key_hash :: proc(key: Value) -> (u64, bool) {
 	if key == nil {
@@ -470,7 +470,7 @@ map_key_hash :: proc(key: Value) -> (u64, bool) {
 			return string_hash(cast(^StringObject)value), true
 
 		case .SYMBOL:
-			assert(false, "symbol is not a Rite runtime value")
+			assert(false, "symbol is not an Eld runtime value")
 			return 0, false
 
 		case .LIST, .VECTOR, .MAP, .NATIVE_FUNCTION, .FUNCTION:
@@ -847,7 +847,7 @@ read_atom :: proc() -> Value {
 			return Value{}
 		}
 
-		// Odin converts the value only after Rite accepts its spelling.
+		// Odin converts the value only after Eld accepts its spelling.
 		if is_float {
 			float_value, float_ok := strconv.parse_f64(text)
 			if !float_ok {
@@ -1445,7 +1445,7 @@ print_value :: proc(value: Value) {
 resolve_import_path :: proc(importer_source_name, import_path: string) -> (string, bool) {
 	path := import_path
 	if filepath.ext(path) == "" {
-		path = fmt.tprintf("%s.rite", import_path)
+		path = fmt.tprintf("%s.eld", import_path)
 	}
 
 	joined_path := ""

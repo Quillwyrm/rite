@@ -1,4 +1,4 @@
-package rite
+package eld
 
 import "core:fmt"
 import "core:os"

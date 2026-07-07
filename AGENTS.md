@@ -2,39 +2,41 @@ You are helping me design and implement a small language / runtime project.
 
 Your job is not to be an agreeable autocomplete engine. Your job is to keep the design honest, simple, explicit, and grounded in the source.
 
-## Current Rite workflow
+## Current Eld workflow
 
 Build the optimized executable:
 
 ```powershell
-odin build src -out:rite.exe -o:speed
+odin build src -out:eld.exe -o:speed
 ```
 
 Run a file:
 
 ```powershell
-.\rite.exe _tests\smoke.rite
+.\eld.exe _tests\smoke.eld
 ```
 
 Evaluate a source string:
 
 ```powershell
-.\rite.exe eval "(+ 1 2)"
+.\eld.exe eval "(+ 1 2)"
 ```
 
 The CLI accepts:
 
-- `rite <file>`
-- `rite eval <string>`
+- `eld <file> [arg...]`
+- `eld eval <string>`
+- `eld dis <file>`
 
-If the file path does not exist and has no `.rite` suffix, Rite also tries
-`<file>.rite`.
+If the file path does not exist and has no `.eld` suffix, Eld also tries
+`<file>.eld`.
 
 Any other arguments print:
 
 ```text
-usage: rite <file>
-       rite eval <string>
+usage: eld <file> [arg...]
+       eld eval <string>
+       eld dis <file>
 ```
 
 ## Current docs layout
@@ -161,17 +163,17 @@ Odin package facts used in this repo:
 
 * A package is a directory of `.odin` files with the same `package` declaration.
 * Imports are package imports, not file imports.
-* All files in `src/rite/` share `package rite`.
-* `main.odin` imports the `rite` package.
+* All files in `src/eld/` share `package eld`.
+* `main.odin` imports the `eld` package.
 
 Current project shape:
 
 ```text
 src/
   main.odin          package main
-  rite/
-    rite.odin        package rite
-    core.odin        package rite
+  eld/
+    eld.odin        package eld
+    core.odin        package eld
 ```
 
 Odin style rules for this project:
@@ -199,19 +201,19 @@ Known LLM failure modes to avoid:
 * adding a helper because a plan mentioned one
 * claiming `Unknown in Odin` and then writing guessed code anyway
 
-## Project: Rite
+## Project: Eld
 
-Rite is the current language/runtime in this repo. It is a small dynamic Lisp-shaped language written in Odin, with reader-tree compilation, bytecode execution, mutable vectors, mutable maps, lexical functions/closures, modules, and core built-ins.
+Eld is the current language/runtime in this repo. It is a small dynamic Lisp-shaped language written in Odin, with reader-tree compilation, bytecode execution, mutable vectors, mutable maps, lexical functions/closures, modules, and core built-ins.
 
 The source code is canonical. `_docs/ref.md` describes the intended current language surface, but docs can drift during design. If source and notes disagree, inspect the source and flag the drift.
 
-Do not infer Rite semantics from Kiln, Lua, Lisp, Clojure, Scheme, or any other language. Prior art can inform naming and tradeoffs, but Rite semantics must be explicit in source or docs.
+Do not infer Eld semantics from Kiln, Lua, Lisp, Clojure, Scheme, or any other language. Prior art can inform naming and tradeoffs, but Eld semantics must be explicit in source or docs.
 
 ## Project: Kiln context
 
 I have already semi-built another language/runtime called **Kiln**.
 
-Kiln is a dynamic, procedural, non-OOP, modern C-style scripting language/runtime. It is real implementation experience and a useful reference point, but it should not overdetermine Rite.
+Kiln is a dynamic, procedural, non-OOP, modern C-style scripting language/runtime. It is real implementation experience and a useful reference point, but it should not overdetermine Eld.
 
 Kiln current/known semantics include:
 
@@ -257,7 +259,7 @@ Kiln has useful implementation lessons:
 * Cheap derivation is often better than stored/memoized flags.
 * Performance is decent already, so do not cargo-cult “Lua did it this way” or “VMs usually do X.”
 
-Kiln matters because it gives me tested instincts and code patterns. But Rite is allowed to be a different language with different goals.
+Kiln matters because it gives me tested instincts and code patterns. But Eld is allowed to be a different language with different goals.
 
 ## How to work with me
 
@@ -314,7 +316,7 @@ No apologetic fluff.
 No “this gets to the heart of...”
 No overexplaining obvious basics unless I ask.
 
-I am trying to build clear, honest systems. Help me keep Rite that way.
+I am trying to build clear, honest systems. Help me keep Eld that way.
 
 
 # CORE ETHOS

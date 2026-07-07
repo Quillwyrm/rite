@@ -3,36 +3,53 @@ package main
 import "core:fmt"
 import "core:os"
 import "core:strings"
-import "rite"
+import "eld"
 
 main :: proc() {
-	if len(os.args) == 3 && os.args[1] == "eval" {
-		vm := rite.make_vm()
-		rite.set_argv(&vm, os.args, 3)
-		result := rite.run_string(&vm, os.args[2])
+	if len(os.args) < 2 {
+		fmt.eprintln("usage: eld <file> [arg...]")
+		fmt.eprintln("         eld eval <string>")
+		fmt.eprintln("         eld dis <file>")
+		os.exit(1)
+	}
+
+	if os.args[1] == "eval" {
+		if len(os.args) != 3 {
+			fmt.eprintln("usage: eld eval <string>")
+			os.exit(1)
+		}
+
+		vm := eld.make_vm()
+		eld.set_argv(&vm, os.args, 3)
+		result := eld.run_string(&vm, os.args[2])
 
 		if vm.error_string != "" {
 			fmt.eprintln(vm.error_string)
 			os.exit(1)
 		}
 
-		rite.print_value(result)
+		eld.print_value(result)
 		fmt.println()
 		return
 	}
 
-	if len(os.args) == 3 && os.args[1] == "dis" {
+	if os.args[1] == "dis" {
+		if len(os.args) != 3 {
+			fmt.eprintln("usage: eld dis <file>")
+			os.exit(1)
+		}
+
 		path_arg := os.args[2]
 		source_path := path_arg
 
-		if !os.exists(source_path) && !strings.has_suffix(path_arg, ".rite") {
-			source_path = fmt.tprintf("%s.rite", path_arg)
+		if !os.exists(source_path) && !strings.has_suffix(path_arg, ".eld") {
+			source_path = fmt.tprintf("%s.eld", path_arg)
 		}
 
-		vm := rite.make_vm()
-		rite.set_argv(&vm, os.args, 3)
+		vm := eld.make_vm()
+		eld.set_argv(&vm, os.args, 3)
 
-		disassembly := rite.disassemble_file(&vm, source_path)
+		disassembly := eld.disassemble_file(&vm, source_path)
 		if vm.error_string != "" {
 			fmt.eprintln(vm.error_string)
 			os.exit(1)
@@ -43,23 +60,16 @@ main :: proc() {
 		return
 	}
 
-	if len(os.args) != 2 {
-		fmt.eprintln("usage: rite <file>")
-		fmt.eprintln("         rite eval <string>")
-		fmt.eprintln("         rite dis <file>")
-		os.exit(1)
-	}
-
 	path_arg := os.args[1]
 	source_path := path_arg
 
-	if !os.exists(source_path) && !strings.has_suffix(path_arg, ".rite") {
-		source_path = fmt.tprintf("%s.rite", path_arg)
+	if !os.exists(source_path) && !strings.has_suffix(path_arg, ".eld") {
+		source_path = fmt.tprintf("%s.eld", path_arg)
 	}
 
-	vm := rite.make_vm()
-	rite.set_argv(&vm, os.args, 2)
-	_ = rite.run_file(&vm, source_path)
+	vm := eld.make_vm()
+	eld.set_argv(&vm, os.args, 2)
+	_ = eld.run_file(&vm, source_path)
 
 	if vm.error_string != "" {
 		fmt.eprintln(vm.error_string)

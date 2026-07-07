@@ -1,4 +1,4 @@
-package rite
+package eld
 
 import "base:intrinsics"
 import "core:fmt"
@@ -624,7 +624,7 @@ native_mod :: proc(vm: ^VM, args: []Value) -> Value {
 	return op_mod(args[0], args[1])
 }
 
-// (= left right) bool; true if values are equal by Rite equality.
+// (= left right) bool; true if values are equal by Eld equality.
 native_equal :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 2 {
 		runtime_error("= expects two arguments")
@@ -633,7 +633,7 @@ native_equal :: proc(vm: ^VM, args: []Value) -> Value {
 	return op_equal(args[0], args[1])
 }
 
-// (!= left right) bool; true if values are not equal by Rite equality.
+// (!= left right) bool; true if values are not equal by Eld equality.
 native_not_equal :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 2 {
 		runtime_error("!= expects two arguments")
@@ -767,7 +767,7 @@ native_map_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(bool(is_object && object.kind == .MAP))
 }
 
-// (fn? value) bool; true if value is a native or Rite function.
+// (fn? value) bool; true if value is a native or Eld function.
 native_function_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 1 {
 		runtime_error("fn? expects one argument")
@@ -899,7 +899,7 @@ native_type :: proc(vm: ^VM, args: []Value) -> Value {
 			case .NATIVE_FUNCTION, .FUNCTION:
 				type_name = "function"
 			case .SYMBOL:
-				assert(false, "symbol is not a Rite runtime value")
+				assert(false, "symbol is not an Eld runtime value")
 				return Value{}
 			}
 		}

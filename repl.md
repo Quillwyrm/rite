@@ -296,4 +296,4 @@ Do not close top-level upvalues between inputs.
 Close normal nested-scope upvalues as usual.
 ```
 
-That gives you a real lexical REPL without turning Rite into “globals in a table.”
+That gives you a real lexical REPL without turning Eld into “globals in a table.”
