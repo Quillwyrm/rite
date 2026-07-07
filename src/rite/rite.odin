@@ -4254,8 +4254,8 @@ run_code :: proc(code: ^Code) -> Value {
 			case .FUNCTION:
 				function := cast(^FunctionObject)callee_object
 
-				if argument_count != function.code.param_count {
-					runtime_error("function called with wrong number of arguments")
+				if argument_count > function.code.param_count {
+					runtime_error(fmt.tprintf("function expected at most %d arguments, got %d", function.code.param_count, argument_count))
 					return Value{}
 				}
 
@@ -4265,6 +4265,10 @@ run_code :: proc(code: ^Code) -> Value {
 				if wanted_slots > MAX_VM_SLOTS {
 					runtime_error("VM slot limit exceeded")
 					return Value{}
+				}
+
+				for i := argument_count; i < function.code.param_count; i += 1 {
+					vm.slots[callee_slot_base + i] = Value{}
 				}
 
 				if vm.frame_count >= MAX_CALL_FRAMES {
