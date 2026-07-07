@@ -35,7 +35,7 @@ per input:
 For a file:
 
 ```scheme id="x4kap1"
-(def x 10)
+(var x 10)
 (def f (fn () x))
 f
 ```
@@ -59,7 +59,7 @@ For a REPL, you do **not** end the root frame after each input.
 Input 1:
 
 ```scheme id="hpskxb"
-(def x 10)
+(var x 10)
 ```
 
 REPL state after input:
@@ -132,7 +132,7 @@ Nested body bindings live only for their body/scope.
 That means:
 
 ```scheme id="i8dglg"
-(def x 10)
+(var x 10)
 ```
 
 persists.
@@ -268,7 +268,7 @@ For:
 
 `x` should not become visible after the runtime error.
 
-So top-level REPL `def` needs the same ordered-binding invariant as files:
+So top-level REPL definitions need the same ordered-binding invariant as files:
 
 ```text id="pwa6j8"
 publish the binding only after RHS succeeds

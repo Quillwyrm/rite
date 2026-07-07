@@ -14,24 +14,24 @@
 
 
 ; The stats map is mutated, but the binding itself is stable.
-(const
+(def
   stats    {}
   args     (os/args)
   arg-root (if (> (len args) 0) (idx args 0) nil)
   root     (path/clean (?? arg-root (os/env "GLOC_PATH") ".")))
 
-(def
+(var
   total-files 0
   total-lines 0)
 
 
-(const (ignored-dir? name)
+(def (ignored-dir? name)
   (or (= name ".git")
       (= name "_work")
       (= name "_bench")))
 
-(const (ignored-file? file)
-  (const
+(def (ignored-file? file)
+  (def
     name (path/base file)
     ext  (path/ext file))
 
@@ -41,8 +41,8 @@
       (= ext ".md")
       (= ext ".exe")))
 
-(const (comment-line? line)
-  (const trimmed (str/trim line))
+(def (comment-line? line)
+  (def trimmed (str/trim line))
 
   (or (= trimmed "")
       (str/prefix? trimmed ";")
@@ -50,16 +50,16 @@
       (str/prefix? trimmed "--")
       (str/prefix? trimmed "#")))
 
-(const (file-ext file)
-  (const ext (path/ext file))
+(def (file-ext file)
+  (def ext (path/ext file))
 
   (if (= ext "")
     "(none)"
     ext))
 
-(const (count-text text)
-  (const lines (str/split text "\n"))
-  (def
+(def (count-text text)
+  (def lines (str/split text "\n"))
+  (var
     i     0
     count 0)
 
@@ -71,8 +71,8 @@
 
   count)
 
-(const (record-file file line-count)
-  (const
+(def (record-file file line-count)
+  (def
     ext   (file-ext file)
     entry (?? (key stats ext)
               (do
@@ -85,30 +85,30 @@
   (set total-files (+ total-files 1))
   (set total-lines (+ total-lines line-count)))
 
-(const (count-file file)
+(def (count-file file)
   (cond
     (ignored-file? file)
       nil
 
     :else
       (do
-        (const [text err] (fs/read-file file))
+        (def [text err] (fs/read-file file))
 
         (if err
           nil
           (record-file file (count-text text))))))
 
 
-(const (pad-left value width)
-  (def text (str value))
+(def (pad-left value width)
+  (var text (str value))
 
   (while (< (len text) width)
     (set text (str " " text)))
 
   text)
 
-(const (pad-right value width)
-  (def text (str value))
+(def (pad-right value width)
+  (var text (str value))
 
   (while (< (len text) width)
     (set text (str text " ")))
@@ -116,8 +116,8 @@
   text)
 
 
-(const (walk dir)
-  (const [names err] (fs/list-dir dir))
+(def (walk dir)
+  (def [names err] (fs/list-dir dir))
 
   (cond
     err
@@ -125,10 +125,10 @@
 
     :else
       (do
-        (def i 0)
+        (var i 0)
 
         (while (< i (len names))
-          (const
+          (def
             name (idx names i)
             full (path/join dir name))
 
@@ -142,18 +142,18 @@
 
           (set i (+ i 1))))))
 
-(const (print-stats)
+(def (print-stats)
   (print "gloc:" root)
 
-  (const exts (keys stats))
-  (def
+  (def exts (keys stats))
+  (var
     files-width (len "files")
     ext-width   (len "ext")
     lines-width (len "lines"))
 
-  (def i 0)
+  (var i 0)
   (while (< i (len exts))
-    (const
+    (def
       ext        (idx exts i)
       entry      (key stats ext)
       files-text (str (key entry :files))
@@ -178,7 +178,7 @@
   (set i 0)
 
   (while (< i (len exts))
-    (const
+    (def
       ext   (idx exts i)
       entry (key stats ext))
 

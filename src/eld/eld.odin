@@ -2023,7 +2023,7 @@ find_local :: proc(builder: ^CodeBuilder, symbol: ^SymbolObject) -> (LocalBindin
 
 symbol_is_reserved_word :: proc(symbol: ^SymbolObject) -> bool {
 	return symbol.text == "def" ||
-	       symbol.text == "const" ||
+	       symbol.text == "var" ||
 	       symbol.text == "set" ||
 	       symbol.text == "do" ||
 	       symbol.text == "if" ||
@@ -2231,8 +2231,8 @@ compile_map_expr :: proc(builder: ^CodeBuilder, map_object: ^MapObject, dst: int
 	}
 }
 
-compile_def_or_const :: proc(builder: ^CodeBuilder, form: Value, mutable: bool) {
-	form_name := "def" if mutable else "const"
+compile_def_or_var :: proc(builder: ^CodeBuilder, form: Value, mutable: bool) {
+	form_name := "var" if mutable else "def"
 
 	object, _ := form.(^Object)
 	list := cast(^ListObject)object
@@ -2502,11 +2502,11 @@ compile_def_or_const :: proc(builder: ^CodeBuilder, form: Value, mutable: bool) 
 }
 
 compile_def :: proc(builder: ^CodeBuilder, form: Value) {
-	compile_def_or_const(builder, form, true)
+	compile_def_or_var(builder, form, false)
 }
 
-compile_const :: proc(builder: ^CodeBuilder, form: Value) {
-	compile_def_or_const(builder, form, false)
+compile_var :: proc(builder: ^CodeBuilder, form: Value) {
+	compile_def_or_var(builder, form, true)
 }
 
 compile_import :: proc(builder: ^CodeBuilder, list: ^ListObject) {
@@ -2644,7 +2644,7 @@ compile_body :: proc(builder: ^CodeBuilder, forms: []Value, dst: int) {
 				head_object, head_is_object := list.items[0].(^Object)
 				if head_is_object && head_object.kind == .SYMBOL {
 					head := cast(^SymbolObject)head_object
-					if head.text == "def" || head.text == "const" {
+					if head.text == "def" || head.text == "var" {
 						continue
 					}
 				}
@@ -2668,8 +2668,8 @@ compile_body :: proc(builder: ^CodeBuilder, forms: []Value, dst: int) {
 						if Compiler.failed { return }
 						continue
 					}
-					if head.text == "const" {
-						compile_const(builder, form)
+					if head.text == "var" {
+						compile_var(builder, form)
 						if Compiler.failed { return }
 						continue
 					}
@@ -2738,8 +2738,8 @@ compile_root_forms :: proc(builder: ^CodeBuilder, forms: []Value, dst: int) {
 						if Compiler.failed { return }
 						continue
 					}
-					if head.text == "const" {
-						compile_const(builder, form)
+					if head.text == "var" {
+						compile_var(builder, form)
 						if Compiler.failed { return }
 						continue
 					}
@@ -2837,8 +2837,8 @@ compile_effect :: proc(builder: ^CodeBuilder, form: Value) {
 					compile_error("`def` is not valid in expression position")
 					return
 				}
-				if head.text == "const" {
-					compile_error("`const` is not valid in expression position")
+				if head.text == "var" {
+					compile_error("`var` is not valid in expression position")
 					return
 				}
 				if head.text == "import" {
@@ -2899,8 +2899,8 @@ compile_body_effect :: proc(builder: ^CodeBuilder, forms: []Value) {
 						if Compiler.failed { return }
 						continue
 					}
-					if head.text == "const" {
-						compile_const(builder, form)
+					if head.text == "var" {
+						compile_var(builder, form)
 						if Compiler.failed { return }
 						continue
 					}
@@ -3706,8 +3706,8 @@ compile_list_expr :: proc(builder: ^CodeBuilder, list: ^ListObject, dst: int) {
 		compile_error("`def` is not valid in expression position")
 		return
 	}
-	if head.text == "const" {
-		compile_error("`const` is not valid in expression position")
+	if head.text == "var" {
+		compile_error("`var` is not valid in expression position")
 		return
 	}
 	if head.text == "import" {
@@ -4194,7 +4194,7 @@ run_code :: proc(code: ^Code) -> Value {
 			if vm.error_string != "" { return Value{} }
 			vm.slots[dst] = result
 
-		// Const opcodes cover common local-update and binary-const lowering.
+		// Constant-pool opcodes cover common local-update and binary constant lowering.
 		case .ADD_CONST:
 			inst := InstABC(word)
 			dst := slot_base + int(inst.a)

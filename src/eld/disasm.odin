@@ -73,7 +73,7 @@ disasm_append_code_sections :: proc(parts: ^[dynamic]string, code: ^Code) {
 		for i := 0; i < len(code.upvalue_descs); i += 1 {
 			desc := code.upvalue_descs[i]
 			source := "local" if desc.from_parent_local else "upvalue"
-			mutability := "mutable" if desc.mutable else "const"
+			mutability := "var" if desc.mutable else "def"
 			append(parts, fmt.tprintf("    U%d = %s %d, %s\n", i, source, desc.index, mutability))
 		}
 	}
@@ -84,7 +84,7 @@ disasm_append_code_sections :: proc(parts: ^[dynamic]string, code: ^Code) {
 
 		for i := 0; i < len(code.exports); i += 1 {
 			binding := code.exports[i]
-			mutability := "mutable" if binding.mutable else "const"
+			mutability := "var" if binding.mutable else "def"
 			append(parts, fmt.tprintf("    %s = R%d, %s\n", binding.symbol.text, binding.slot, mutability))
 		}
 	}
