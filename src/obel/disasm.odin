@@ -95,7 +95,11 @@ disasm_append_code_sections :: proc(parts: ^[dynamic]string, code: ^Code) {
 
 		for i := 0; i < len(code.child_codes); i += 1 {
 			child := code.child_codes[i]
-			append(parts, fmt.tprintf("    F%d = params %d, slots %d, ops %d\n", i, child.param_count, child.frame_slot_count, len(child.bytecode)))
+			param_text := fmt.tprintf("%d", child.fixed_param_count)
+			if child.has_rest_param {
+				param_text = fmt.tprintf("%d + rest", child.fixed_param_count)
+			}
+			append(parts, fmt.tprintf("    F%d = params %s, slots %d, ops %d\n", i, param_text, child.frame_slot_count, len(child.bytecode)))
 		}
 	}
 }
@@ -313,7 +317,11 @@ disasm_append_code_tree :: proc(parts: ^[dynamic]string, code: ^Code, label: str
 	append(parts, "\n")
 	append(parts, label)
 	append(parts, "\n")
-	append(parts, fmt.tprintf("  params %d\n", code.param_count))
+	param_text := fmt.tprintf("%d", code.fixed_param_count)
+	if code.has_rest_param {
+		param_text = fmt.tprintf("%d + rest", code.fixed_param_count)
+	}
+	append(parts, fmt.tprintf("  params %s\n", param_text))
 	append(parts, fmt.tprintf("  slots  %d\n", code.frame_slot_count))
 	append(parts, fmt.tprintf("  ops    %d\n", len(code.bytecode)))
 

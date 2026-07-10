@@ -22,7 +22,6 @@
   total-files 0
   total-lines 0)
 
-
 (def (ignored-dir? name)
   (case name
     ".git"   true
@@ -97,7 +96,6 @@
         (if err
           nil
           (record-file file (count-text text))))))
-
 
 (def (pad-left value width)
   (var text (str value))

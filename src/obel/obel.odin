@@ -3,7 +3,6 @@ package obel
 import "base:intrinsics"
 import "core:fmt"
 import "core:hash"
-import "core:math"
 import "core:mem"
 import "core:os"
 import filepath "core:path/filepath"
@@ -190,8 +189,9 @@ Code :: struct {
 	constants:   []Value,
 	child_codes: []^Code,
 
-	frame_slot_count: int,
-	param_count:      int,
+	frame_slot_count:  int,
+	fixed_param_count: int,
+	has_rest_param:   bool,
 
 	upvalue_descs: []UpvalueDesc,
 	exports:       []LocalBinding,
@@ -290,8 +290,9 @@ CodeBuilder :: struct {
 	const_cache: [dynamic]ConstCacheEntry,
 	child_codes: [dynamic]^Code,
 
-	frame_slot_count: int,
-	param_count:      int,
+	frame_slot_count:  int,
+	fixed_param_count: int,
+	has_rest_param:   bool,
 
 	local_bindings: [MAX_FRAME_SLOTS]LocalBinding,
 	local_count:    int,
@@ -1605,8 +1606,14 @@ load_module :: proc(importer_source_name, import_path: string) -> ^Module {
 
 // Code construction ==============================================================================
 
-begin_code :: proc(parent: ^CodeBuilder, param_count: int, source_name: string) -> CodeBuilder {
-	assert(param_count >= 0 && param_count <= MAX_FRAME_SLOTS, "param count out of range")
+begin_code :: proc(parent: ^CodeBuilder, fixed_param_count: int, has_rest_param: bool, source_name: string) -> CodeBuilder {
+	assert(fixed_param_count >= 0 && fixed_param_count <= MAX_FRAME_SLOTS, "fixed param count out of range")
+
+	param_slot_count := fixed_param_count
+	if has_rest_param {
+		param_slot_count += 1
+	}
+	assert(param_slot_count <= MAX_FRAME_SLOTS, "param slot count out of range")
 
 	return CodeBuilder{
 		bytecode    = make([dynamic]u32),
@@ -1614,13 +1621,14 @@ begin_code :: proc(parent: ^CodeBuilder, param_count: int, source_name: string) 
 		const_cache = make([dynamic]ConstCacheEntry),
 		child_codes = make([dynamic]^Code),
 
-		frame_slot_count = param_count,
-		param_count      = param_count,
+		frame_slot_count  = param_slot_count,
+		fixed_param_count = fixed_param_count,
+		has_rest_param   = has_rest_param,
 
 		local_count = 0,
 
 		current_scope_local_start = 0,
-		next_slot                 = param_count,
+		next_slot                 = param_slot_count,
 
 		upvalue_descs   = make([dynamic]UpvalueDesc),
 		upvalue_symbols = make([dynamic]^SymbolObject),
@@ -1668,8 +1676,9 @@ end_code :: proc(builder: ^CodeBuilder) -> ^Code {
 		bytecode         = bytecode,
 		constants        = constants,
 		child_codes      = child_codes,
-		frame_slot_count = builder.frame_slot_count,
-		param_count      = builder.param_count,
+		frame_slot_count  = builder.frame_slot_count,
+		fixed_param_count = builder.fixed_param_count,
+		has_rest_param   = builder.has_rest_param,
 		upvalue_descs    = upvalue_descs,
 		exports          = exports,
 	}
@@ -2286,7 +2295,91 @@ symbol_is_reserved_word :: proc(symbol: ^SymbolObject) -> bool {
 	       symbol.text == "import" ||
 	       symbol.text == "export" ||
 	       symbol.text == "idx" ||
-	       symbol.text == "key"
+	       symbol.text == "key" ||
+	       symbol.text == "."
+}
+
+scan_param_list :: proc(items: []Value, function_name: ^SymbolObject, params: []^SymbolObject, fixed_param_count: ^int, has_rest_param: ^bool) {
+	fixed_param_count^ = 0
+	has_rest_param^ = false
+
+	for i := 0; i < len(items); i += 1 {
+		param_object, param_is_object := items[i].(^Object)
+		if !param_is_object || param_object.kind != .SYMBOL {
+			compile_error("function parameter must be a symbol.")
+			return
+		}
+
+		param := cast(^SymbolObject)param_object
+		if param.text == "." {
+			if i + 1 >= len(items) {
+				compile_error("rest parameter marker `.` must be followed by a parameter symbol.")
+				return
+			}
+			if i + 2 != len(items) {
+				compile_error("rest parameter must be final.")
+				return
+			}
+
+			rest_object, rest_is_object := items[i + 1].(^Object)
+			if !rest_is_object || rest_object.kind != .SYMBOL {
+				compile_error("rest parameter must be a symbol.")
+				return
+			}
+
+			rest_param := cast(^SymbolObject)rest_object
+			if symbol_is_reserved_word(rest_param) {
+				compile_error(fmt.tprintf("cannot use reserved symbol `%s` as parameter.", rest_param.text))
+				return
+			}
+
+			if function_name != nil && rest_param == function_name {
+				compile_error(fmt.tprintf("parameter `%s` duplicates the function binding symbol.", rest_param.text))
+				return
+			}
+
+			for j := 0; j < fixed_param_count^; j += 1 {
+				if params[j] == rest_param {
+					compile_error(fmt.tprintf("duplicate parameter `%s`.", rest_param.text))
+					return
+				}
+			}
+
+			if fixed_param_count^ + 1 > int(max(u8)) {
+				compile_error("function has too many parameters.")
+				return
+			}
+
+			params[fixed_param_count^] = rest_param
+			has_rest_param^ = true
+			return
+		}
+
+		if symbol_is_reserved_word(param) {
+			compile_error(fmt.tprintf("cannot use reserved symbol `%s` as parameter.", param.text))
+			return
+		}
+
+		if function_name != nil && param == function_name {
+			compile_error(fmt.tprintf("parameter `%s` duplicates the function binding symbol.", param.text))
+			return
+		}
+
+		for j := 0; j < fixed_param_count^; j += 1 {
+			if params[j] == param {
+				compile_error(fmt.tprintf("duplicate parameter `%s`.", param.text))
+				return
+			}
+		}
+
+		if fixed_param_count^ >= int(max(u8)) {
+			compile_error("function has too many parameters.")
+			return
+		}
+
+		params[fixed_param_count^] = param
+		fixed_param_count^ = fixed_param_count^ + 1
+	}
 }
 
 find_upvalue :: proc(builder: ^CodeBuilder, symbol: ^SymbolObject) -> (int, bool) {
@@ -2748,41 +2841,11 @@ compile_def_or_var :: proc(builder: ^CodeBuilder, form: Value, mutable, record_f
 			}
 		}
 
-		param_count := len(signature.items) - 1
-		if param_count > int(max(u8)) {
-			compile_error("function has too many parameters.")
-			return
-		}
-
-		for i := 0; i < param_count; i += 1 {
-			param_value := signature.items[i + 1]
-
-			param_object, param_is_object := param_value.(^Object)
-			if !param_is_object || param_object.kind != .SYMBOL {
-				compile_error("function parameter must be a symbol.")
-				return
-			}
-
-			param := cast(^SymbolObject)param_object
-			if symbol_is_reserved_word(param) {
-				compile_error(fmt.tprintf("cannot use reserved symbol `%s` as parameter.", param.text))
-				return
-			}
-
-			if param == name {
-				compile_error(fmt.tprintf("parameter `%s` duplicates the function binding symbol.", param.text))
-				return
-			}
-
-			for j := 0; j < i; j += 1 {
-				previous_object, _ := signature.items[j + 1].(^Object)
-				previous := cast(^SymbolObject)previous_object
-				if previous == param {
-					compile_error(fmt.tprintf("duplicate parameter `%s`.", param.text))
-					return
-				}
-			}
-		}
+		params: [MAX_FRAME_SLOTS]^SymbolObject
+		fixed_param_count := 0
+		has_rest_param := false
+		scan_param_list(signature.items[1:], name, params[:], &fixed_param_count, &has_rest_param)
+		if Compiler.failed { return }
 
 		binding_slot := claim_slot(builder)
 		if Compiler.failed { return }
@@ -2801,12 +2864,15 @@ compile_def_or_var :: proc(builder: ^CodeBuilder, form: Value, mutable, record_f
 			append(&builder.file_bindings, binding)
 		}
 
-		child := begin_code(builder, param_count, builder.source_name)
+		child := begin_code(builder, fixed_param_count, has_rest_param, builder.source_name)
 
-		for i := 0; i < param_count; i += 1 {
-			param_object, _ := signature.items[i + 1].(^Object)
-			param := cast(^SymbolObject)param_object
+		param_slot_count := fixed_param_count
+		if has_rest_param {
+			param_slot_count += 1
+		}
 
+		for i := 0; i < param_slot_count; i += 1 {
+			param := params[i]
 			child.local_bindings[child.local_count] = LocalBinding{
 				symbol  = param,
 				slot    = i,
@@ -4254,39 +4320,21 @@ compile_fn :: proc(parent: ^CodeBuilder, list: ^ListObject, dst: int) {
 	}
 
 	params := cast(^ListObject)params_object
-	if len(params.items) > int(max(u8)) {
-		compile_error("function has too many parameters.")
-		return
+	param_symbols: [MAX_FRAME_SLOTS]^SymbolObject
+	fixed_param_count := 0
+	has_rest_param := false
+	scan_param_list(params.items[:], nil, param_symbols[:], &fixed_param_count, &has_rest_param)
+	if Compiler.failed { return }
+
+	child := begin_code(parent, fixed_param_count, has_rest_param, parent.source_name)
+
+	param_slot_count := fixed_param_count
+	if has_rest_param {
+		param_slot_count += 1
 	}
 
-	for i := 0; i < len(params.items); i += 1 {
-		param_object, param_is_object := params.items[i].(^Object)
-		if !param_is_object || param_object.kind != .SYMBOL {
-			compile_error("function parameter must be a symbol.")
-			return
-		}
-
-		param := cast(^SymbolObject)param_object
-		if symbol_is_reserved_word(param) {
-			compile_error(fmt.tprintf("cannot use reserved symbol `%s` as parameter.", param.text))
-			return
-		}
-
-		for j := 0; j < i; j += 1 {
-			previous_object, _ := params.items[j].(^Object)
-			previous := cast(^SymbolObject)previous_object
-			if previous == param {
-				compile_error(fmt.tprintf("duplicate parameter `%s`.", param.text))
-				return
-			}
-		}
-	}
-
-	child := begin_code(parent, len(params.items), parent.source_name)
-
-	for i := 0; i < len(params.items); i += 1 {
-		param_object, _ := params.items[i].(^Object)
-		param := cast(^SymbolObject)param_object
+	for i := 0; i < param_slot_count; i += 1 {
+		param := param_symbols[i]
 		child.local_bindings[child.local_count] = LocalBinding{
 			symbol  = param,
 			slot    = i,
@@ -4556,7 +4604,7 @@ compile_expr :: proc(builder: ^CodeBuilder, value: Value, dst: int) {
 
 compile_forms :: proc(forms: []Value, source_name: string) -> ^Code {
 	Compiler.failed = false
-	root := begin_code(nil, 0, source_name)
+	root := begin_code(nil, 0, false, source_name)
 
 	return_slot := claim_slot(&root)
 	if Compiler.failed {
@@ -5069,9 +5117,10 @@ run_code :: proc(code: ^Code) -> Value {
 
 			case .FUNCTION:
 				function := cast(^FunctionObject)callee_object
+				fixed_count := function.code.fixed_param_count
 
-				if argument_count > function.code.param_count {
-					runtime_error(fmt.tprintf("function expected at most %d arguments, got %d.", function.code.param_count, argument_count))
+				if !function.code.has_rest_param && argument_count > fixed_count {
+					runtime_error(fmt.tprintf("function expected at most %d arguments, got %d.", fixed_count, argument_count))
 					return Value{}
 				}
 
@@ -5083,8 +5132,27 @@ run_code :: proc(code: ^Code) -> Value {
 					return Value{}
 				}
 
-				for i := argument_count; i < function.code.param_count; i += 1 {
+				for i := argument_count; i < fixed_count; i += 1 {
 					vm.slots[callee_slot_base + i] = Value{}
+				}
+
+				if function.code.has_rest_param {
+					rest_count := argument_count - fixed_count
+					if rest_count < 0 {
+						rest_count = 0
+					}
+
+					items := make([dynamic]Value)
+					if rest_count > 0 {
+						reserve(&items, rest_count)
+					}
+
+					// Copy extras before replacing the first extra argument slot with the rest vector.
+					for i := 0; i < rest_count; i += 1 {
+						append(&items, vm.slots[callee_slot_base + fixed_count + i])
+					}
+
+					vm.slots[callee_slot_base + fixed_count] = Value(cast(^Object)new_vector_object(items))
 				}
 
 				if vm.frame_count >= MAX_CALL_FRAMES {

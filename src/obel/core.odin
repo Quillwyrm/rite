@@ -8,7 +8,6 @@ import "core:os"
 import filepath "core:path/filepath"
 import "core:strings"
 
-
 // Native function binding =========================================================================
 
 new_native_function_object :: proc(native: NativeProc) -> ^NativeFunctionObject {
@@ -2198,6 +2197,7 @@ native_io_print_err :: proc(vm: ^VM, args: []Value) -> Value {
 // Registration ==================================================================================
 
 install_builtins :: proc(vm: ^VM) {
+
 	// Supplied builtins are immutable; install them exactly once per VM.
 	bind_native_builtin(vm, "+", native_add)
 	bind_native_builtin(vm, "-", native_sub)
