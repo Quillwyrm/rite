@@ -265,11 +265,11 @@ disasm_append_code :: proc(parts: ^[dynamic]string, code: ^Code) {
 
 		case .EACH_INIT:
 			inst := InstABC(word)
-			map_target_ok := "false"
+			accepts_map_entries := "false"
 			if inst.c != 0 {
-				map_target_ok = "true"
+				accepts_map_entries = "true"
 			}
-			disasm_append_inst(parts, ip, "EACH_INIT", fmt.tprintf("R%d, R%d, %s", inst.a, inst.b, map_target_ok), "")
+			disasm_append_inst(parts, ip, "EACH_INIT", fmt.tprintf("R%d, R%d, %s", inst.a, inst.b, accepts_map_entries), "")
 
 		case .EACH_NEXT:
 			inst := InstABC(word)

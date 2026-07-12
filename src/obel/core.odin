@@ -900,8 +900,8 @@ native_number :: proc(vm: ^VM, args: []Value) -> Value {
 	case ^Object:
 		if v.kind == .STRING {
 			text := strings.trim_space((cast(^StringObject)v).text)
-			number, ok := number_from_text(text, false)
-			if ok { return number }
+			number, parse_error := parse_number_text(text)
+			if parse_error == "" { return number }
 		}
 	}
 
@@ -1429,29 +1429,28 @@ native_merge :: proc(vm: ^VM, args: []Value) -> Value {
 
 // Higher-order collection builtins ---------------------------------------------------------------
 
-collection_callback_items :: proc(collection: Value, proc_name: string) -> (item_vector: ^VectorObject, initial_length: int, valid: bool) {
+// Vector input returns the original vector; map input returns a fresh pairs snapshot.
+collection_callback_items :: proc(collection: Value, proc_name: string) -> ^VectorObject {
 	object, is_object := collection.(^Object)
 	if !is_object {
 		runtime_error(fmt.tprintf("`%s` expected vector or map as collection.", proc_name))
-		return nil, 0, false
+		return nil
 	}
 
 	switch object.kind {
 	case .VECTOR:
-		vector := cast(^VectorObject)object
-		return vector, len(vector.items), true
+		return cast(^VectorObject)object
 
 	case .MAP:
-		snapshot := map_pairs_snapshot(cast(^MapObject)object)
-		return snapshot, len(snapshot.items), true
+		return map_pairs_snapshot(cast(^MapObject)object)
 
 	case .STRING, .SYMBOL, .LIST, .NATIVE_FUNCTION, .FUNCTION:
 		runtime_error(fmt.tprintf("`%s` expected vector or map as collection.", proc_name))
-		return nil, 0, false
+		return nil
 	}
 
 	assert(false, "invalid collection object kind")
-	return nil, 0, false
+	return nil
 }
 
 // (map f coll) vector; Transform each collection item.
@@ -1465,8 +1464,9 @@ native_map :: proc(vm: ^VM, args: []Value) -> Value {
 		return Value{}
 	}
 
-	item_vector, initial_length, items_ok := collection_callback_items(args[1], "map")
-	if !items_ok { return Value{} }
+	item_vector := collection_callback_items(args[1], "map")
+	if item_vector == nil { return Value{} }
+	initial_length := len(item_vector.items)
 
 	results := make([dynamic]Value)
 	reserve(&results, initial_length)
@@ -1479,7 +1479,7 @@ native_map :: proc(vm: ^VM, args: []Value) -> Value {
 		}
 
 		call_args[0] = item_vector.items[i]
-		result := call_function_value(vm, args[0], call_args[:])
+		result := call_function_from_native(vm, args[0], call_args[:])
 		if vm.error_string != "" { return Value{} }
 
 		append(&results, result)
@@ -1499,8 +1499,9 @@ native_filter :: proc(vm: ^VM, args: []Value) -> Value {
 		return Value{}
 	}
 
-	item_vector, initial_length, items_ok := collection_callback_items(args[1], "filter")
-	if !items_ok { return Value{} }
+	item_vector := collection_callback_items(args[1], "filter")
+	if item_vector == nil { return Value{} }
+	initial_length := len(item_vector.items)
 
 	results := make([dynamic]Value)
 
@@ -1513,7 +1514,7 @@ native_filter :: proc(vm: ^VM, args: []Value) -> Value {
 
 		item := item_vector.items[i]
 		call_args[0] = item
-		keep := call_function_value(vm, args[0], call_args[:])
+		keep := call_function_from_native(vm, args[0], call_args[:])
 		if vm.error_string != "" { return Value{} }
 
 		if !value_is_falsey(keep) {
@@ -1535,8 +1536,9 @@ native_reduce :: proc(vm: ^VM, args: []Value) -> Value {
 		return Value{}
 	}
 
-	item_vector, initial_length, items_ok := collection_callback_items(args[2], "reduce")
-	if !items_ok { return Value{} }
+	item_vector := collection_callback_items(args[2], "reduce")
+	if item_vector == nil { return Value{} }
+	initial_length := len(item_vector.items)
 
 	result := args[1]
 
@@ -1549,7 +1551,7 @@ native_reduce :: proc(vm: ^VM, args: []Value) -> Value {
 
 		call_args[0] = result
 		call_args[1] = item_vector.items[i]
-		result = call_function_value(vm, args[0], call_args[:])
+		result = call_function_from_native(vm, args[0], call_args[:])
 		if vm.error_string != "" { return Value{} }
 	}
 
@@ -1567,8 +1569,9 @@ native_find :: proc(vm: ^VM, args: []Value) -> Value {
 		return Value{}
 	}
 
-	item_vector, initial_length, items_ok := collection_callback_items(args[1], "find")
-	if !items_ok { return Value{} }
+	item_vector := collection_callback_items(args[1], "find")
+	if item_vector == nil { return Value{} }
+	initial_length := len(item_vector.items)
 
 	call_args: [1]Value
 	for i := 0; i < initial_length; i += 1 {
@@ -1579,7 +1582,7 @@ native_find :: proc(vm: ^VM, args: []Value) -> Value {
 
 		item := item_vector.items[i]
 		call_args[0] = item
-		found := call_function_value(vm, args[0], call_args[:])
+		found := call_function_from_native(vm, args[0], call_args[:])
 		if vm.error_string != "" { return Value{} }
 
 		if !value_is_falsey(found) {
@@ -1601,8 +1604,9 @@ native_pick :: proc(vm: ^VM, args: []Value) -> Value {
 		return Value{}
 	}
 
-	item_vector, initial_length, items_ok := collection_callback_items(args[1], "pick")
-	if !items_ok { return Value{} }
+	item_vector := collection_callback_items(args[1], "pick")
+	if item_vector == nil { return Value{} }
+	initial_length := len(item_vector.items)
 
 	call_args: [1]Value
 	for i := 0; i < initial_length; i += 1 {
@@ -1612,7 +1616,7 @@ native_pick :: proc(vm: ^VM, args: []Value) -> Value {
 		}
 
 		call_args[0] = item_vector.items[i]
-		result := call_function_value(vm, args[0], call_args[:])
+		result := call_function_from_native(vm, args[0], call_args[:])
 		if vm.error_string != "" { return Value{} }
 
 		if !value_is_falsey(result) {

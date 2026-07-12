@@ -137,7 +137,7 @@ Opcode :: enum u8 {
 	MAP_GET_CONST, // ABC: A=dst, B=map, C=constant key
 	MAP_SET,       // ABC: A=map, B=key, C=value -> expression result remains in C
 	MAP_SET_CONST, // ABC: A=map, B=constant key, C=value -> expression result remains in C
-	EACH_INIT,     // ABC: A=state base, B=collection, C=map target ok
+	EACH_INIT,     // ABC: A=state base, B=collection, C=accepts map entries
 	EACH_NEXT,     // ABC: A=state base, B=collection
 	EACH_END,      // ABC: A=state base, B=collection
 
@@ -240,7 +240,9 @@ VM :: struct {
 	frame_count: int,
 
 	open_upvalues: [dynamic]^Upvalue,
-	call_slot_top: int,
+
+	// End of active scratch call windows used by native-to-function calls.
+	native_call_slot_top: int,
 
 	builtins: [dynamic]Binding,
 	modules:  [dynamic]Module,
@@ -311,8 +313,7 @@ CodeBuilder :: struct {
 	file_bindings: [dynamic]LocalBinding,
 	exports:       [dynamic]LocalBinding,
 
-	source_name: string,
-	parent:      ^CodeBuilder,
+	parent: ^CodeBuilder,
 }
 
 Compiler := struct {
@@ -840,10 +841,9 @@ skip_trivia :: proc() {
 
 // Reader scans ===================================================================================
 
-number_from_text :: proc(text: string, report_reader_errors: bool) -> (Value, bool) {
+parse_number_text :: proc(text: string) -> (Value, string) {
 	if len(text) == 0 {
-		if report_reader_errors { reader_error("invalid number literal.") }
-		return Value{}, false
+		return Value{}, "invalid number literal."
 	}
 
 	number_index := 0
@@ -873,19 +873,17 @@ number_from_text :: proc(text: string, report_reader_errors: bool) -> (Value, bo
 
 	// Valid numbers contain a digit and consume the entire text.
 	if digit_count == 0 || number_index != len(text) {
-		if report_reader_errors { reader_error("invalid number literal.") }
-		return Value{}, false
+		return Value{}, "invalid number literal."
 	}
 
 	// Odin converts the value only after Obel accepts its spelling.
 	if is_float {
 		float_value, float_ok := strconv.parse_f64(text)
 		if !float_ok {
-			if report_reader_errors { reader_error("float literal out of range.") }
-			return Value{}, false
+			return Value{}, "float literal out of range."
 		}
 
-		return Value(float_value), true
+		return Value(float_value), ""
 	}
 
 	// Unsigned magnitude handles the extra negative i64 value without overflow.
@@ -901,8 +899,7 @@ number_from_text :: proc(text: string, report_reader_errors: bool) -> (Value, bo
 		digit := u64(text[digit_index] - '0')
 
 		if magnitude > (magnitude_limit - digit) / 10 {
-			if report_reader_errors { reader_error("integer literal out of range.") }
-			return Value{}, false
+			return Value{}, "integer literal out of range."
 		}
 
 		magnitude = magnitude * 10 + digit
@@ -910,11 +907,11 @@ number_from_text :: proc(text: string, report_reader_errors: bool) -> (Value, bo
 	}
 
 	if is_negative {
-		if magnitude == magnitude_limit { return Value(min(i64)), true }
-		return Value(-i64(magnitude)), true
+		if magnitude == magnitude_limit { return Value(min(i64)), "" }
+		return Value(-i64(magnitude)), ""
 	}
 
-	return Value(i64(magnitude)), true
+	return Value(i64(magnitude)), ""
 }
 
 read_atom :: proc() -> Value {
@@ -940,8 +937,11 @@ read_atom :: proc() -> Value {
 
 	// Malformed numeric-looking atoms are errors; other atoms become symbols.
 	if looks_numeric {
-		number, number_ok := number_from_text(text, true)
-		if !number_ok { return Value{} }
+		number, parse_error := parse_number_text(text)
+		if parse_error != "" {
+			reader_error(parse_error)
+			return Value{}
+		}
 		return number
 	}
 
@@ -1249,109 +1249,6 @@ read_source :: proc(source: string) -> [dynamic]Value {
 	return forms
 }
 
-
-// Debug tree printer =============================================================================
-
-// Each entry says whether that ancestor has another sibling below it.
-debug_print_value_tree :: proc(value: Value, continuations: ^[dynamic]bool) {
-	for i := 0; i + 1 < len(continuations); i += 1 {
-		if continuations[i] {
-			fmt.print("│  ")
-		} else {
-			fmt.print("   ")
-		}
-	}
-
-	if len(continuations) > 0 {
-		if continuations[len(continuations) - 1] {
-			fmt.print("├─ ")
-		} else {
-			fmt.print("└─ ")
-		}
-	}
-
-	if value == nil {
-		fmt.println("Nil")
-		return
-	}
-
-	switch v in value {
-	case bool:
-		fmt.printf("Bool(%v)\n", v)
-
-	case i64:
-		fmt.printf("Int(%d)\n", v)
-
-	case f64:
-		fmt.printf("Float(%.15g)\n", v)
-
-	case ^Object:
-		switch v.kind {
-		case .STRING:
-			object := cast(^StringObject)v
-			fmt.printf("String(\"%s\")\n", object.text)
-
-		case .SYMBOL:
-			object := cast(^SymbolObject)v
-			fmt.printf("Symbol(`%s`)\n", object.text)
-
-		case .LIST:
-			object := cast(^ListObject)v
-			fmt.printf("List(%d)\n", len(object.items))
-
-			for i := 0; i < len(object.items); i += 1 {
-				append(continuations, i + 1 < len(object.items))
-				debug_print_value_tree(object.items[i], continuations)
-				pop(continuations)
-			}
-
-		case .VECTOR:
-			object := cast(^VectorObject)v
-			fmt.printf("Vector(%d)\n", len(object.items))
-
-			for i := 0; i < len(object.items); i += 1 {
-				append(continuations, i + 1 < len(object.items))
-				debug_print_value_tree(object.items[i], continuations)
-				pop(continuations)
-			}
-
-		case .MAP:
-			object := cast(^MapObject)v
-			fmt.printf("Map(%d)\n", len(object.entries))
-
-			for i := 0; i < len(object.entries); i += 1 {
-				entry := object.entries[i]
-
-				append(continuations, true)
-				debug_print_value_tree(entry.key, continuations)
-				pop(continuations)
-
-				append(continuations, i + 1 < len(object.entries))
-				debug_print_value_tree(entry.value, continuations)
-				pop(continuations)
-			}
-
-		case .NATIVE_FUNCTION, .FUNCTION:
-			assert(false, "runtime function object in reader tree")
-		}
-	}
-}
-
-debug_print_source_tree :: proc(forms: [dynamic]Value) {
-	continuations := make([dynamic]bool)
-
-	for i := 0; i < len(forms); i += 1 {
-		debug_print_value_tree(forms[i], &continuations)
-
-		if i + 1 < len(forms) {
-			fmt.println()
-		}
-	}
-
-	delete(continuations)
-}
-
-
 // Runtime display ================================================================================
 
 // parents contains only composite objects currently above this value.
@@ -1612,7 +1509,7 @@ load_module :: proc(importer_source_name, import_path: string) -> ^Module {
 
 // Code construction ==============================================================================
 
-begin_code :: proc(parent: ^CodeBuilder, fixed_param_count: int, has_rest_param: bool, source_name: string) -> CodeBuilder {
+begin_code :: proc(parent: ^CodeBuilder, fixed_param_count: int, has_rest_param: bool) -> CodeBuilder {
 	assert(fixed_param_count >= 0 && fixed_param_count <= MAX_FRAME_SLOTS, "fixed param count out of range")
 
 	param_slot_count := fixed_param_count
@@ -1645,8 +1542,7 @@ begin_code :: proc(parent: ^CodeBuilder, fixed_param_count: int, has_rest_param:
 		file_bindings = make([dynamic]LocalBinding),
 		exports       = make([dynamic]LocalBinding),
 
-		source_name = source_name,
-		parent      = parent,
+		parent = parent,
 	}
 }
 
@@ -2125,9 +2021,9 @@ EACH_KEY_SLOT          :: 5
 EACH_VALUE_SLOT        :: 6
 EACH_STATE_SLOT_COUNT  :: 7
 
-emit_each_init :: proc(builder: ^CodeBuilder, state_base, collection_slot: int, map_target_ok: bool) {
+emit_each_init :: proc(builder: ^CodeBuilder, state_base, collection_slot: int, accepts_map_entries: bool) {
 	flag := 0
-	if map_target_ok {
+	if accepts_map_entries {
 		flag = 1
 	}
 
@@ -2720,16 +2616,12 @@ reserve_binding_target_slots :: proc(builder: ^CodeBuilder, target: Value, mutab
 	}
 }
 
-publish_bindings :: proc(builder: ^CodeBuilder, bindings: []LocalBinding, binding_count: int, record_file_bindings: bool) {
+publish_bindings :: proc(builder: ^CodeBuilder, bindings: []LocalBinding, binding_count: int) {
 	for i := 0; i < binding_count; i += 1 {
 		binding := bindings[i]
 
 		builder.local_bindings[builder.local_count] = binding
 		builder.local_count += 1
-
-		if record_file_bindings {
-			append(&builder.file_bindings, binding)
-		}
 	}
 }
 
@@ -2810,7 +2702,7 @@ init_binding_target :: proc(builder: ^CodeBuilder, target: Value, source_slot: i
 	}
 }
 
-compile_def_or_var :: proc(builder: ^CodeBuilder, form: Value, mutable, record_file_bindings: bool) {
+compile_def_or_var :: proc(builder: ^CodeBuilder, form: Value, mutable: bool) {
 	form_name := "var" if mutable else "def"
 
 	object := form.(^Object)
@@ -2866,11 +2758,7 @@ compile_def_or_var :: proc(builder: ^CodeBuilder, form: Value, mutable, record_f
 		builder.local_bindings[builder.local_count] = binding
 		builder.local_count += 1
 
-		if record_file_bindings {
-			append(&builder.file_bindings, binding)
-		}
-
-		child := begin_code(builder, fixed_param_count, has_rest_param, builder.source_name)
+		child := begin_code(builder, fixed_param_count, has_rest_param)
 
 		param_slot_count := fixed_param_count
 		if has_rest_param {
@@ -2945,7 +2833,7 @@ compile_def_or_var :: proc(builder: ^CodeBuilder, form: Value, mutable, record_f
 		compile_expr(builder, expression, source_slot)
 		if Compiler.failed { return }
 
-		publish_bindings(builder, target_bindings[:], target_binding_count, record_file_bindings)
+		publish_bindings(builder, target_bindings[:], target_binding_count)
 
 		init_binding_target(builder, target, source_slot, target_bindings[:], target_binding_count)
 		if Compiler.failed { return }
@@ -2954,15 +2842,15 @@ compile_def_or_var :: proc(builder: ^CodeBuilder, form: Value, mutable, record_f
 	}
 }
 
-compile_def :: proc(builder: ^CodeBuilder, form: Value, record_file_bindings: bool) {
-	compile_def_or_var(builder, form, false, record_file_bindings)
+compile_def :: proc(builder: ^CodeBuilder, form: Value) {
+	compile_def_or_var(builder, form, false)
 }
 
-compile_var :: proc(builder: ^CodeBuilder, form: Value, record_file_bindings: bool) {
-	compile_def_or_var(builder, form, true, record_file_bindings)
+compile_var :: proc(builder: ^CodeBuilder, form: Value) {
+	compile_def_or_var(builder, form, true)
 }
 
-compile_import :: proc(builder: ^CodeBuilder, list: ^ListObject) {
+compile_import :: proc(builder: ^CodeBuilder, list: ^ListObject, importer_source_name: string) {
 	if len(list.items) != 2 && len(list.items) != 3 {
 		compile_error("`import` expects a path, or namespace and path.\nusage:\n  (import \"path\")\n  (import namespace \"path\")")
 		return
@@ -3013,7 +2901,7 @@ compile_import :: proc(builder: ^CodeBuilder, list: ^ListObject) {
 		}
 	}
 
-	module := load_module(builder.source_name, import_path)
+	module := load_module(importer_source_name, import_path)
 	if Compiler.failed { return }
 	assert(module != nil, "load_module returned nil without failing")
 
@@ -3086,28 +2974,9 @@ compile_export :: proc(builder: ^CodeBuilder, list: ^ListObject) {
 // Definitions mutate the local environment and do not become the body result.
 // The last expression result wins; defs-only and empty bodies return nil.
 compile_body :: proc(builder: ^CodeBuilder, forms: []Value, dst: int) {
-	last_result_form := -1
+	had_result_expr := false
 
-	for form, form_index in forms {
-		object, is_object := form.(^Object)
-		if is_object && object.kind == .LIST {
-			list := cast(^ListObject)object
-
-			if len(list.items) > 0 {
-				head_object, head_is_object := list.items[0].(^Object)
-				if head_is_object && head_object.kind == .SYMBOL {
-					head := cast(^SymbolObject)head_object
-					if head.text == "def" || head.text == "var" {
-						continue
-					}
-				}
-			}
-		}
-
-		last_result_form = form_index
-	}
-
-	for form, form_index in forms {
+	for form in forms {
 		object, is_object := form.(^Object)
 		if is_object && object.kind == .LIST {
 			list := cast(^ListObject)object
@@ -3117,12 +2986,12 @@ compile_body :: proc(builder: ^CodeBuilder, forms: []Value, dst: int) {
 				if head_is_object && head_object.kind == .SYMBOL {
 					head := cast(^SymbolObject)head_object
 					if head.text == "def" {
-						compile_def(builder, form, false)
+						compile_def(builder, form)
 						if Compiler.failed { return }
 						continue
 					}
 					if head.text == "var" {
-						compile_var(builder, form, false)
+						compile_var(builder, form)
 						if Compiler.failed { return }
 						continue
 					}
@@ -3130,21 +2999,17 @@ compile_body :: proc(builder: ^CodeBuilder, forms: []Value, dst: int) {
 			}
 		}
 
-		if form_index == last_result_form {
-			compile_expr(builder, form, dst)
-			if Compiler.failed { return }
-		} else {
-			compile_effect(builder, form)
-			if Compiler.failed { return }
-		}
+		compile_expr(builder, form, dst)
+		if Compiler.failed { return }
+		had_result_expr = true
 	}
 
-	if last_result_form < 0 {
+	if !had_result_expr {
 		emit_load_nil(builder, dst)
 	}
 }
 
-compile_root_forms :: proc(builder: ^CodeBuilder, forms: []Value, dst: int) {
+compile_root_forms :: proc(builder: ^CodeBuilder, forms: []Value, dst: int, source_name: string) {
 	had_result_expr := false
 	seen_non_import := false
 
@@ -3164,7 +3029,7 @@ compile_root_forms :: proc(builder: ^CodeBuilder, forms: []Value, dst: int) {
 							return
 						}
 
-						compile_import(builder, list)
+						compile_import(builder, list, source_name)
 						if Compiler.failed { return }
 						continue
 					}
@@ -3186,14 +3051,18 @@ compile_root_forms :: proc(builder: ^CodeBuilder, forms: []Value, dst: int) {
 
 					seen_non_import = true
 
-					if head.text == "def" {
-						compile_def(builder, form, true)
+					if head.text == "def" || head.text == "var" {
+						local_start := builder.local_count
+						if head.text == "def" {
+							compile_def(builder, form)
+						} else {
+							compile_var(builder, form)
+						}
 						if Compiler.failed { return }
-						continue
-					}
-					if head.text == "var" {
-						compile_var(builder, form, true)
-						if Compiler.failed { return }
+
+						for i := local_start; i < builder.local_count; i += 1 {
+							append(&builder.file_bindings, builder.local_bindings[i])
+						}
 						continue
 					}
 				}
@@ -3290,199 +3159,6 @@ compile_break :: proc(builder: ^CodeBuilder, list: ^ListObject) {
 
 	append(&builder.break_jump_fixups, len(builder.bytecode))
 	emit_jump(builder, 0)
-}
-
-compile_effect :: proc(builder: ^CodeBuilder, form: Value) {
-	// Compile a form only for side effects, restoring temporary result slots afterward.
-	slot_mark := builder.next_slot
-
-	object, is_object := form.(^Object)
-	if is_object && object.kind == .LIST {
-		list := cast(^ListObject)object
-		if len(list.items) > 0 {
-			head_object, head_is_object := list.items[0].(^Object)
-			if head_is_object && head_object.kind == .SYMBOL {
-				head := cast(^SymbolObject)head_object
-
-				if head.text == "def" {
-					compile_error("`def` is not valid in expression position.")
-					return
-				}
-				if head.text == "var" {
-					compile_error("`var` is not valid in expression position.")
-					return
-				}
-				if head.text == "import" {
-					compile_error("`import` is only valid at file top level.")
-					return
-				}
-				if head.text == "export" {
-					compile_error("`export` is only valid at file top level.")
-					return
-				}
-				if head.text == "set" {
-					scratch := claim_slot(builder)
-					if Compiler.failed { return }
-
-					compile_set(builder, list, scratch, false)
-					builder.next_slot = slot_mark
-					return
-				}
-				if head.text == "do" {
-					compile_do_effect(builder, list)
-					builder.next_slot = slot_mark
-					return
-				}
-				if head.text == "if" {
-					compile_if_effect(builder, list)
-					builder.next_slot = slot_mark
-					return
-				}
-				if head.text == "while" {
-					compile_while_effect(builder, list)
-					builder.next_slot = slot_mark
-					return
-				}
-				if head.text == "each" {
-					compile_each(builder, list, 0, false)
-					builder.next_slot = slot_mark
-					return
-				}
-				if head.text == "break" {
-					compile_break(builder, list)
-					builder.next_slot = slot_mark
-					return
-				}
-			}
-		}
-	}
-
-	scratch := claim_slot(builder)
-	if Compiler.failed { return }
-
-	compile_expr(builder, form, scratch)
-	builder.next_slot = slot_mark
-}
-
-compile_body_effect :: proc(builder: ^CodeBuilder, forms: []Value) {
-	// Definitions still bind in effect position; only expression results are discarded.
-	for form in forms {
-		object, is_object := form.(^Object)
-		if is_object && object.kind == .LIST {
-			list := cast(^ListObject)object
-
-			if len(list.items) > 0 {
-				head_object, head_is_object := list.items[0].(^Object)
-				if head_is_object && head_object.kind == .SYMBOL {
-					head := cast(^SymbolObject)head_object
-					if head.text == "def" {
-						compile_def(builder, form, false)
-						if Compiler.failed { return }
-						continue
-					}
-					if head.text == "var" {
-						compile_var(builder, form, false)
-						if Compiler.failed { return }
-						continue
-					}
-				}
-			}
-		}
-
-		compile_effect(builder, form)
-		if Compiler.failed { return }
-	}
-}
-
-compile_do_effect :: proc(builder: ^CodeBuilder, list: ^ListObject) {
-	local_mark := builder.local_count
-	slot_mark := builder.next_slot
-	outer_scope_start := builder.current_scope_local_start
-
-	builder.current_scope_local_start = local_mark
-	compile_body_effect(builder, list.items[1:])
-	if Compiler.failed { return }
-
-	if builder.local_count > local_mark {
-		emit_close_upvalues(builder, slot_mark)
-	}
-
-	builder.local_count = local_mark
-	builder.next_slot = slot_mark
-	builder.current_scope_local_start = outer_scope_start
-}
-
-compile_if_effect :: proc(builder: ^CodeBuilder, list: ^ListObject) {
-	if len(list.items) < 3 || len(list.items) > 4 {
-		compile_error("`if` expects condition and branch expressions.\nusage: (if cond then else?)")
-		return
-	}
-
-	slot_mark := builder.next_slot
-	false_jump := compile_false_jump(builder, list.items[1])
-	if Compiler.failed { return }
-
-	compile_effect(builder, list.items[2])
-	if Compiler.failed { return }
-
-	end_jump := len(builder.bytecode)
-	emit_jump(builder, 0)
-	if Compiler.failed { return }
-
-	patch_jump_target(builder, false_jump, len(builder.bytecode))
-
-	if len(list.items) == 4 {
-		compile_effect(builder, list.items[3])
-		if Compiler.failed { return }
-	}
-
-	patch_jump_target(builder, end_jump, len(builder.bytecode))
-	builder.next_slot = slot_mark
-}
-
-compile_while_effect :: proc(builder: ^CodeBuilder, list: ^ListObject) {
-	if len(list.items) < 2 {
-		compile_error("`while` expects a condition.\nusage:\n  (while cond\n    body-form...)")
-		return
-	}
-
-	local_mark := builder.local_count
-	slot_mark := builder.next_slot
-	outer_scope_start := builder.current_scope_local_start
-
-	loop_start := len(builder.bytecode)
-
-	exit_jump := compile_false_jump(builder, list.items[1])
-	if Compiler.failed { return }
-
-	builder.current_scope_local_start = builder.local_count
-	body_slot_mark := builder.next_slot
-
-	loop := ActiveLoop{
-		break_base = len(builder.break_jump_fixups),
-		close_slot = body_slot_mark,
-	}
-	append(&builder.active_loops, loop)
-
-	compile_body_effect(builder, list.items[2:])
-	if Compiler.failed { return }
-
-	loop = builder.active_loops[len(builder.active_loops) - 1]
-	resize(&builder.active_loops, len(builder.active_loops) - 1)
-
-	if builder.local_count > local_mark {
-		emit_close_upvalues(builder, body_slot_mark)
-	}
-
-	builder.local_count = local_mark
-	builder.next_slot = slot_mark
-	builder.current_scope_local_start = outer_scope_start
-
-	emit_jump(builder, loop_start)
-
-	exit_label := len(builder.bytecode)
-	patch_jump_target(builder, exit_jump, exit_label)
-	patch_loop_breaks(builder, loop, exit_label)
 }
 
 compile_do :: proc(builder: ^CodeBuilder, list: ^ListObject, dst: int) {
@@ -3756,7 +3432,7 @@ compile_while :: proc(builder: ^CodeBuilder, list: ^ListObject, dst: int) {
 	}
 	append(&builder.active_loops, loop)
 
-	compile_body_effect(builder, list.items[2:])
+	compile_body(builder, list.items[2:], dst)
 	if Compiler.failed { return }
 
 	loop = builder.active_loops[len(builder.active_loops) - 1]
@@ -3780,7 +3456,7 @@ compile_while :: proc(builder: ^CodeBuilder, list: ^ListObject, dst: int) {
 	emit_load_nil(builder, dst)
 }
 
-compile_each :: proc(builder: ^CodeBuilder, list: ^ListObject, dst: int, keep_result: bool) {
+compile_each :: proc(builder: ^CodeBuilder, list: ^ListObject, dst: int) {
 	if len(list.items) < 3 {
 		compile_error("`each` expects target and collection expression.\nusage:\n  (each target collection\n    body-form...)")
 		return
@@ -3802,10 +3478,10 @@ compile_each :: proc(builder: ^CodeBuilder, list: ^ListObject, dst: int, keep_re
 	if Compiler.failed { return }
 
 	target_object, target_is_object := target.(^Object)
-	map_target_ok := false
+	accepts_map_entries := false
 	if target_is_object && target_object.kind == .VECTOR {
 		target_vector := cast(^VectorObject)target_object
-		map_target_ok = len(target_vector.items) == 2
+		accepts_map_entries = len(target_vector.items) == 2
 	}
 
 	collection_slot := claim_slot(builder)
@@ -3826,10 +3502,10 @@ compile_each :: proc(builder: ^CodeBuilder, list: ^ListObject, dst: int, keep_re
 	reserve_binding_target_slots(builder, target, false, target_bindings[:], &target_binding_count)
 	if Compiler.failed { return }
 
-	publish_bindings(builder, target_bindings[:], target_binding_count, false)
+	publish_bindings(builder, target_bindings[:], target_binding_count)
 	builder.current_scope_local_start = local_mark
 
-	emit_each_init(builder, state_base, collection_slot, map_target_ok)
+	emit_each_init(builder, state_base, collection_slot, accepts_map_entries)
 
 	loop_start := len(builder.bytecode)
 	emit_each_next(builder, state_base, collection_slot)
@@ -3844,7 +3520,7 @@ compile_each :: proc(builder: ^CodeBuilder, list: ^ListObject, dst: int, keep_re
 	}
 	append(&builder.active_loops, loop)
 
-	if map_target_ok {
+	if accepts_map_entries {
 		kind_slot := state_base + EACH_KIND_SLOT
 		vector_bind_jump := len(builder.bytecode)
 		emit_jump_if_falsey(builder, kind_slot, 0)
@@ -3868,7 +3544,7 @@ compile_each :: proc(builder: ^CodeBuilder, list: ^ListObject, dst: int, keep_re
 		if Compiler.failed { return }
 	}
 
-	compile_body_effect(builder, list.items[3:])
+	compile_body(builder, list.items[3:], dst)
 	if Compiler.failed { return }
 
 	loop = builder.active_loops[len(builder.active_loops) - 1]
@@ -3889,12 +3565,10 @@ compile_each :: proc(builder: ^CodeBuilder, list: ^ListObject, dst: int, keep_re
 	patch_loop_breaks(builder, loop, each_end)
 	emit_each_end(builder, state_base, collection_slot)
 
-	if keep_result {
-		emit_load_nil(builder, dst)
-	}
+	emit_load_nil(builder, dst)
 }
 
-compile_set :: proc(builder: ^CodeBuilder, list: ^ListObject, dst: int, keep_result: bool) {
+compile_set :: proc(builder: ^CodeBuilder, list: ^ListObject, dst: int) {
 	if len(list.items) != 3 {
 		compile_error("`set` expects an assignment target and value.\nusage: (set target expr)")
 		return
@@ -3991,9 +3665,7 @@ compile_set :: proc(builder: ^CodeBuilder, list: ^ListObject, dst: int, keep_res
 											lhs_slot = binding.slot
 										}
 
-										if keep_result {
-											emit_move(builder, dst, binding.slot)
-										}
+										emit_move(builder, dst, binding.slot)
 										return
 									}
 								}
@@ -4332,7 +4004,7 @@ compile_fn :: proc(parent: ^CodeBuilder, list: ^ListObject, dst: int) {
 	scan_param_list(params.items[:], nil, param_symbols[:], &fixed_param_count, &has_rest_param)
 	if Compiler.failed { return }
 
-	child := begin_code(parent, fixed_param_count, has_rest_param, parent.source_name)
+	child := begin_code(parent, fixed_param_count, has_rest_param)
 
 	param_slot_count := fixed_param_count
 	if has_rest_param {
@@ -4411,7 +4083,7 @@ compile_list_expr :: proc(builder: ^CodeBuilder, list: ^ListObject, dst: int) {
 		return
 	}
 	if head.text == "set" {
-		compile_set(builder, list, dst, true)
+		compile_set(builder, list, dst)
 		return
 	}
 	if head.text == "do" {
@@ -4435,7 +4107,7 @@ compile_list_expr :: proc(builder: ^CodeBuilder, list: ^ListObject, dst: int) {
 		return
 	}
 	if head.text == "each" {
-		compile_each(builder, list, dst, true)
+		compile_each(builder, list, dst)
 		return
 	}
 	if head.text == "break" {
@@ -4610,7 +4282,7 @@ compile_expr :: proc(builder: ^CodeBuilder, value: Value, dst: int) {
 
 compile_forms :: proc(forms: []Value, source_name: string) -> ^Code {
 	Compiler.failed = false
-	root := begin_code(nil, 0, false, source_name)
+	root := begin_code(nil, 0, false)
 
 	return_slot := claim_slot(&root)
 	if Compiler.failed {
@@ -4618,7 +4290,7 @@ compile_forms :: proc(forms: []Value, source_name: string) -> ^Code {
 		return nil
 	}
 
-	compile_root_forms(&root, forms, return_slot)
+	compile_root_forms(&root, forms, return_slot, source_name)
 	if Compiler.failed {
 		delete_code_builder(&root)
 		return nil
@@ -4758,20 +4430,19 @@ start_function_call :: proc(vm: ^VM, base, argument_count: int) -> (result: Valu
 	return Value{}, false
 }
 
-call_function_value :: proc(vm: ^VM, function: Value, args: []Value) -> Value {
-	old_frame_count := vm.frame_count
-	frame := &vm.frames[old_frame_count - 1]
+call_function_from_native :: proc(vm: ^VM, function: Value, args: []Value) -> Value {
+	frame := &vm.frames[vm.frame_count - 1]
 	frame_top := frame.slot_base + frame.code.frame_slot_count
-	base := max(frame_top, vm.call_slot_top)
-	call_slot_top := base + 1 + len(args)
+	base := max(frame_top, vm.native_call_slot_top)
+	new_native_call_slot_top := base + 1 + len(args)
 
-	if call_slot_top > MAX_VM_SLOTS {
+	if new_native_call_slot_top > MAX_VM_SLOTS {
 		runtime_error("runtime stack limit exceeded.")
 		return Value{}
 	}
 
-	old_call_slot_top := vm.call_slot_top
-	vm.call_slot_top = call_slot_top
+	old_native_call_slot_top := vm.native_call_slot_top
+	vm.native_call_slot_top = new_native_call_slot_top
 
 	vm.slots[base] = function
 	for i := 0; i < len(args); i += 1 {
@@ -4782,19 +4453,19 @@ call_function_value :: proc(vm: ^VM, function: Value, args: []Value) -> Value {
 	if vm.error_string != "" { return Value{} }
 
 	if frame_pushed {
-		result = run_vm(vm, old_frame_count)
+		result = run_vm(vm)
 		if vm.error_string != "" { return Value{} }
-
-		vm.call_slot_top = old_call_slot_top
-		return result
 	}
 
-	vm.call_slot_top = old_call_slot_top
+	vm.native_call_slot_top = old_native_call_slot_top
 	return result
 }
 
-// Executes VM frames until the current call returns to stop_frame_count.
-run_vm :: proc(vm: ^VM, stop_frame_count: int) -> Value {
+// Executes the active frame and its calls until that frame returns.
+run_vm :: proc(vm: ^VM) -> Value {
+	assert(vm.frame_count > 0, "VM has no active frame")
+
+	return_to_frame_count := vm.frame_count - 1
 	frame := &vm.frames[vm.frame_count - 1]
 	active_code := frame.code
 	bytecode := active_code.bytecode
@@ -4804,7 +4475,6 @@ run_vm :: proc(vm: ^VM, stop_frame_count: int) -> Value {
 	pc := frame.instruction_index
 
 	for {
-		assert(vm.frame_count > 0, "VM has no active frame")
 		assert(pc < len(bytecode), "code ended without RETURN")
 
 		word := bytecode[pc]
@@ -5381,7 +5051,7 @@ run_vm :: proc(vm: ^VM, stop_frame_count: int) -> Value {
 			inst := InstABC(word)
 			state_base := slot_base + int(inst.a)
 			collection_value := vm.slots[slot_base + int(inst.b)]
-			map_target_ok := inst.c != 0
+			accepts_map_entries := inst.c != 0
 
 			collection_object, collection_is_object := collection_value.(^Object)
 			if !collection_is_object {
@@ -5397,7 +5067,7 @@ run_vm :: proc(vm: ^VM, stop_frame_count: int) -> Value {
 				vm.slots[state_base + EACH_LIMIT_SLOT] = Value(i64(len(vector.items)))
 
 			case .MAP:
-				if !map_target_ok {
+				if !accepts_map_entries {
 					runtime_error("map `each` requires [key value] target.")
 					return Value{}
 				}
@@ -5628,7 +5298,7 @@ run_vm :: proc(vm: ^VM, stop_frame_count: int) -> Value {
 
 			vm.frame_count -= 1
 
-			if vm.frame_count == stop_frame_count {
+			if vm.frame_count == return_to_frame_count {
 				return result
 			}
 
@@ -5662,9 +5332,9 @@ run_code :: proc(code: ^Code) -> Value {
 		slot_base         = 0,
 	}
 	vm.frame_count = 1
-	vm.call_slot_top = 0
+	vm.native_call_slot_top = 0
 
-	return run_vm(vm, 0)
+	return run_vm(vm)
 }
 
 
