@@ -1627,6 +1627,255 @@ native_pick :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value{}
 }
 
+stable_sort_order :: proc(vm: ^VM, values: []Value, comparator: Value) -> [dynamic]int {
+	count := len(values)
+
+	// order holds indexes into values; merge passes move indexes, not values.
+	order := make([dynamic]int, count)
+	for i := 0; i < count; i += 1 {
+		order[i] = i
+	}
+
+	if count < 2 {
+		return order
+	}
+
+	default_values_are_numbers := comparator == nil && value_is_number(values[0])
+
+	scratch := make([dynamic]int, count)
+	defer delete(scratch)
+
+	source := order[:]
+	destination := scratch[:]
+	source_is_order := true
+
+	for width := 1; width < count; width *= 2 {
+		for left := 0; left < count; left += width * 2 {
+			mid := left + width
+			if mid > count { mid = count }
+
+			right_end := left + width * 2
+			if right_end > count { right_end = count }
+
+			i := left
+			j := mid
+
+			for out := left; out < right_end; out += 1 {
+				if i >= mid {
+					destination[out] = source[j]
+					j += 1
+					continue
+				}
+
+				if j >= right_end {
+					destination[out] = source[i]
+					i += 1
+					continue
+				}
+
+				left_index := source[i]
+				right_index := source[j]
+				right_before_left := false
+
+				if comparator != nil {
+					call_args: [2]Value
+					call_args[0] = values[right_index]
+					call_args[1] = values[left_index]
+
+					result := call_function_from_native(vm, comparator, call_args[:])
+					if vm.error_string != "" { return order }
+
+					right_before_left = !value_is_falsey(result)
+				} else if default_values_are_numbers {
+					right_before_left = compare_numbers(values[right_index], values[left_index], .LESS)
+				} else {
+					right_object := values[right_index].(^Object)
+					left_object := values[left_index].(^Object)
+					right_string := cast(^StringObject)right_object
+					left_string := cast(^StringObject)left_object
+
+					right_before_left = strings.compare(right_string.text, left_string.text) < 0
+				}
+
+				if right_before_left {
+					destination[out] = right_index
+					j += 1
+				} else {
+					destination[out] = left_index
+					i += 1
+				}
+			}
+		}
+
+		temp := source
+		source = destination
+		destination = temp
+		source_is_order = !source_is_order
+	}
+
+	if !source_is_order {
+		copy(order[:], source)
+	}
+
+	return order
+}
+
+// (sort vector) vector; Stable sort with default number/string ordering.
+// (sort comp-fn vector) vector; Stable sort with a comparator.
+native_sort :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 1 && len(args) != 2 {
+		runtime_error("`sort` expects one or two arguments.\nusage: (sort vector)\n       (sort comp-fn vector)")
+		return Value{}
+	}
+
+	comparator := Value{}
+	vector_value := args[0]
+
+	if len(args) == 2 {
+		if !value_is_function(args[0]) {
+			runtime_error("`sort` expected function as first argument.")
+			return Value{}
+		}
+
+		comparator = args[0]
+		vector_value = args[1]
+	}
+
+	object, is_object := vector_value.(^Object)
+	if !is_object || object.kind != .VECTOR {
+		runtime_error("`sort` expected vector as final argument.")
+		return Value{}
+	}
+
+	vector := cast(^VectorObject)object
+	items := make([dynamic]Value, len(vector.items))
+	copy(items[:], vector.items[:])
+	defer delete(items)
+
+	if comparator == nil && len(items) > 0 {
+		first_is_number := value_is_number(items[0])
+		first_object, first_is_object := items[0].(^Object)
+		first_is_string := first_is_object && first_object.kind == .STRING
+
+		if !first_is_number && !first_is_string {
+			runtime_error("`sort` default ordering expected numbers or strings.")
+			return Value{}
+		}
+
+		for i := 1; i < len(items); i += 1 {
+			if first_is_number {
+				if !value_is_number(items[i]) {
+					runtime_error("`sort` default ordering expected all numbers or all strings.")
+					return Value{}
+				}
+			} else {
+				item_object, item_is_object := items[i].(^Object)
+				if !item_is_object || item_object.kind != .STRING {
+					runtime_error("`sort` default ordering expected all numbers or all strings.")
+					return Value{}
+				}
+			}
+		}
+	}
+
+	order := stable_sort_order(vm, items[:], comparator)
+	defer delete(order)
+	if vm.error_string != "" { return Value{} }
+
+	results := make([dynamic]Value, len(items))
+	for i := 0; i < len(order); i += 1 {
+		results[i] = items[order[i]]
+	}
+
+	return Value(cast(^Object)new_vector_object(results))
+}
+
+// (sort-by key-fn vector) vector; Stable sort by generated keys.
+// (sort-by key-fn comp-fn vector) vector; Stable sort by generated keys with a comparator.
+native_sort_by :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 2 && len(args) != 3 {
+		runtime_error("`sort-by` expects two or three arguments.\nusage: (sort-by key-fn vector)\n       (sort-by key-fn comp-fn vector)")
+		return Value{}
+	}
+
+	if !value_is_function(args[0]) {
+		runtime_error("`sort-by` expected function as first argument.")
+		return Value{}
+	}
+
+	key_function := args[0]
+	comparator := Value{}
+	vector_value := args[1]
+
+	if len(args) == 3 {
+		if !value_is_function(args[1]) {
+			runtime_error("`sort-by` expected function as second argument.")
+			return Value{}
+		}
+
+		comparator = args[1]
+		vector_value = args[2]
+	}
+
+	object, is_object := vector_value.(^Object)
+	if !is_object || object.kind != .VECTOR {
+		runtime_error("`sort-by` expected vector as final argument.")
+		return Value{}
+	}
+
+	vector := cast(^VectorObject)object
+	items := make([dynamic]Value, len(vector.items))
+	copy(items[:], vector.items[:])
+	defer delete(items)
+
+	keys := make([dynamic]Value, len(items))
+	defer delete(keys)
+
+	call_args: [1]Value
+	for i := 0; i < len(items); i += 1 {
+		call_args[0] = items[i]
+		keys[i] = call_function_from_native(vm, key_function, call_args[:])
+		if vm.error_string != "" { return Value{} }
+	}
+
+	if comparator == nil && len(keys) > 0 {
+		first_is_number := value_is_number(keys[0])
+		first_object, first_is_object := keys[0].(^Object)
+		first_is_string := first_is_object && first_object.kind == .STRING
+
+		if !first_is_number && !first_is_string {
+			runtime_error("`sort-by` default ordering expected number or string keys.")
+			return Value{}
+		}
+
+		for i := 1; i < len(keys); i += 1 {
+			if first_is_number {
+				if !value_is_number(keys[i]) {
+					runtime_error("`sort-by` default ordering expected all number keys or all string keys.")
+					return Value{}
+				}
+			} else {
+				key_object, key_is_object := keys[i].(^Object)
+				if !key_is_object || key_object.kind != .STRING {
+					runtime_error("`sort-by` default ordering expected all number keys or all string keys.")
+					return Value{}
+				}
+			}
+		}
+	}
+
+	order := stable_sort_order(vm, keys[:], comparator)
+	defer delete(order)
+	if vm.error_string != "" { return Value{} }
+
+	results := make([dynamic]Value, len(items))
+	for i := 0; i < len(order); i += 1 {
+		results[i] = items[order[i]]
+	}
+
+	return Value(cast(^Object)new_vector_object(results))
+}
+
 // (print value...) nil; Display values separated by spaces, followed by newline.
 native_print :: proc(vm: ^VM, args: []Value) -> Value {
 	for i := 0; i < len(args); i += 1 {
@@ -2641,6 +2890,8 @@ install_builtins :: proc(vm: ^VM) {
 	bind_native_builtin(vm, "reduce", native_reduce)
 	bind_native_builtin(vm, "find", native_find)
 	bind_native_builtin(vm, "pick", native_pick)
+	bind_native_builtin(vm, "sort", native_sort)
+	bind_native_builtin(vm, "sort-by", native_sort_by)
 	bind_native_builtin(vm, "merge", native_merge)
 	bind_native_builtin(vm, "print", native_print)
 	bind_native_builtin(vm, "write", native_write)

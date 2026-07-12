@@ -3,7 +3,8 @@
 ; Comment lines start with ;, //, --, or # after trimming.
 ;
 ; Usage:
-;   obel examples/gloc.obel [path]
+;   obel examples/gloc.obel [path] [ext]
+;   obel examples/gloc.obel .obel
 
 (import "fs")
 (import "os")
@@ -11,16 +12,36 @@
 (import "str")
 
 
-; The stats map is mutated, but the binding itself is stable.
+; Normal mode records grouped stats. Extension mode records per-file rows.
 (def
-  stats    {}
-  args     (os/args)
-  arg-root (if (> (len args) 0) (idx args 0) nil)
-  root     (path/clean (?? arg-root (os/env "GLOC_PATH") ".")))
+  stats {}
+  files []
+  args  (os/args))
 
 (var
   total-files 0
   total-lines 0)
+
+(def (usage)
+  (print "usage: obel examples/gloc.obel [path] [ext]")
+  (print "       obel examples/gloc.obel .obel")
+  (os/exit 1))
+
+(if (> (len args) 2)
+  (usage))
+
+(def
+  one-arg     (= (len args) 1)
+  two-args    (= (len args) 2)
+  first-arg   (if (> (len args) 0) (idx args 0) nil)
+  second-arg  (if two-args (idx args 1) nil)
+  arg-is-ext  (and one-arg (str/prefix? first-arg "."))
+  ext-arg     (if arg-is-ext first-arg second-arg)
+  ext-filter  (if ext-arg
+                (if (str/prefix? ext-arg ".") ext-arg (str "." ext-arg))
+                nil)
+  arg-root    (if arg-is-ext nil first-arg)
+  root        (path/clean (?? arg-root (os/env "GLOC_PATH") ".")))
 
 (def (ignored-dir? name)
   (case name
@@ -34,7 +55,8 @@
     name (path/base file)
     ext  (path/ext file))
 
-  (or (case name
+  (or (and ext-filter (!= ext ext-filter))
+      (case name
         ".gitignore"     true
         ".gitattributes" true
         false)
@@ -71,15 +93,18 @@
   count)
 
 (def (record-file file line-count)
-  (def
-    ext   (file-ext file)
-    entry (?? (key stats ext)
-              (do
-                (set (key stats ext) {:files 0 :lines 0})
-                (key stats ext))))
+  (if ext-filter
+    (push files {:path file :lines line-count})
+    (do
+      (def
+        ext   (file-ext file)
+        entry (?? (key stats ext)
+                  (do
+                    (set (key stats ext) {:files 0 :lines 0})
+                    (key stats ext))))
 
-  (set (key entry :files) (+ (key entry :files) 1))
-  (set (key entry :lines) (+ (key entry :lines) line-count))
+      (set (key entry :files) (+ (key entry :files) 1))
+      (set (key entry :lines) (+ (key entry :lines) line-count))))
 
   (set total-files (+ total-files 1))
   (set total-lines (+ total-lines line-count)))
@@ -111,6 +136,23 @@
 
   text)
 
+(def (display-path value)
+  (str/replace value "\\" "/"))
+
+(def (display-root)
+  (if (= root ".") "cwd" (display-path root)))
+
+(def (stat-ext pair)
+  (idx pair 0))
+
+(def (stat-lines pair)
+  (key (idx pair 1) :lines))
+
+(def (file-path row)
+  (display-path (key row :path)))
+
+(def (file-lines row)
+  (key row :lines))
 
 (def (walk dir)
   (def [names err] (fs/list-dir dir))
@@ -128,15 +170,42 @@
         (fs/file? full)
           (count-file full)))))
 
-(def (print-stats)
-  (print "gloc:" root)
+(def (print-file-stats)
+  (print "gloc:" (str (display-root) "/*" ext-filter))
+
+  (def rows (sort-by file-lines > (sort-by file-path files)))
+
+  (var
+    lines-width (len "lines")
+    file-width  (len "file"))
+
+  (each {:path file :lines lines} rows
+    (set lines-width (max lines-width (len (str lines))))
+    (set file-width (max file-width (len (display-path file)))))
+
+  (write
+    (pad-left "lines" lines-width) "  "
+    (pad-right "file" file-width)  "\n")
+
+  (each {:path file :lines lines} rows
+    (write
+      (pad-left lines lines-width)        "  "
+      (pad-right (display-path file) file-width) "\n"))
+
+  (print)
+  (print total-lines "lines" total-files "files"))
+
+(def (print-grouped-stats)
+  (print "gloc:" (display-root))
+
+  (def rows (sort-by stat-lines > (sort-by stat-ext (pairs stats))))
 
   (var
     files-width (len "files")
     ext-width   (len "ext")
     lines-width (len "lines"))
 
-  (each [ext {:files files :lines lines}] stats
+  (each [ext {:files files :lines lines}] rows
     (def
       files-text (str files)
       lines-text (str lines))
@@ -150,15 +219,14 @@
     (pad-right "ext" ext-width)    "  "
     (pad-left "lines" lines-width) "\n")
 
-  (each [ext {:files files :lines lines}] stats
+  (each [ext {:files files :lines lines}] rows
     (write
       (pad-left files files-width) "  "
       (pad-right ext ext-width)    "  "
       (pad-left lines lines-width) "\n"))
 
   (print)
-  (print "total" total-files "files" total-lines "lines"))
-
+  (print total-lines "lines" total-files "files"))
 
 (cond
   (fs/dir? root)
@@ -171,4 +239,6 @@
     (print "path not found:" root)
     (os/exit 1)))
 
-(print-stats)
+(if ext-filter
+  (print-file-stats)
+  (print-grouped-stats))
