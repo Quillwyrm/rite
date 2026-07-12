@@ -193,7 +193,7 @@
       (pad-right (display-path file) file-width) "\n"))
 
   (print)
-  (print total-lines "lines" total-files "files"))
+  (print total-lines "lines in" total-files "files"))
 
 (def (print-grouped-stats)
   (print "gloc:" (display-root))
@@ -201,8 +201,8 @@
   (def rows (sort-by stat-lines > (sort-by stat-ext (pairs stats))))
 
   (var
-    files-width (len "files")
     ext-width   (len "ext")
+    files-width (len "files")
     lines-width (len "lines"))
 
   (each [ext {:files files :lines lines}] rows
@@ -215,18 +215,18 @@
     (set lines-width (max lines-width (len lines-text))))
 
   (write
-    (pad-left "files" files-width) "  "
     (pad-right "ext" ext-width)    "  "
+    (pad-left "files" files-width) "  "
     (pad-left "lines" lines-width) "\n")
 
   (each [ext {:files files :lines lines}] rows
     (write
-      (pad-left files files-width) "  "
       (pad-right ext ext-width)    "  "
+      (pad-left files files-width) "  "
       (pad-left lines lines-width) "\n"))
 
   (print)
-  (print total-lines "lines" total-files "files"))
+  (print total-lines "lines in" total-files "files"))
 
 (cond
   (fs/dir? root)

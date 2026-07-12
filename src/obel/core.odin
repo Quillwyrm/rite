@@ -577,6 +577,33 @@ op_pop :: proc(vector_value: Value) -> Value {
 
 // Native argument helpers ========================================================================
 
+require_arg_count :: proc(args: []Value, expected: int, message: string) -> bool {
+	if len(args) != expected {
+		runtime_error(message)
+		return false
+	}
+
+	return true
+}
+
+require_min_arg_count :: proc(args: []Value, minimum: int, message: string) -> bool {
+	if len(args) < minimum {
+		runtime_error(message)
+		return false
+	}
+
+	return true
+}
+
+require_arg_count_range :: proc(args: []Value, minimum, maximum: int, message: string) -> bool {
+	if len(args) < minimum || len(args) > maximum {
+		runtime_error(message)
+		return false
+	}
+
+	return true
+}
+
 require_string_arg :: proc(args: []Value, index: int, proc_name, arg_name: string) -> (string, bool) {
 	object, is_object := args[index].(^Object)
 	if !is_object || object.kind != .STRING {
@@ -595,6 +622,44 @@ require_int_arg :: proc(args: []Value, index: int, proc_name, arg_name: string) 
 	}
 
 	return value, true
+}
+
+require_vector_arg :: proc(args: []Value, index: int, proc_name, arg_name: string) -> (^VectorObject, bool) {
+	object, is_object := args[index].(^Object)
+	if !is_object || object.kind != .VECTOR {
+		runtime_error(fmt.tprintf("`%s` expected vector as %s argument.", proc_name, arg_name))
+		return nil, false
+	}
+
+	return cast(^VectorObject)object, true
+}
+
+require_map_arg :: proc(args: []Value, index: int, proc_name, arg_name: string) -> (^MapObject, bool) {
+	object, is_object := args[index].(^Object)
+	if !is_object || object.kind != .MAP {
+		runtime_error(fmt.tprintf("`%s` expected map as %s argument.", proc_name, arg_name))
+		return nil, false
+	}
+
+	return cast(^MapObject)object, true
+}
+
+require_function_arg :: proc(args: []Value, index: int, proc_name, arg_name: string) -> (Value, bool) {
+	if !value_is_function(args[index]) {
+		runtime_error(fmt.tprintf("`%s` expected function as %s argument.", proc_name, arg_name))
+		return Value{}, false
+	}
+
+	return args[index], true
+}
+
+// Builds the core-module [value err] result vector.
+value_err_vector :: proc(value, err: Value) -> Value {
+	items := make([dynamic]Value, 2)
+	items[0] = value
+	items[1] = err
+
+	return Value(cast(^Object)new_vector_object(items))
 }
 
 
@@ -622,19 +687,13 @@ native_div :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (% number number) number; Remainder.
 native_mod :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 2 {
-		runtime_error("`%` expects two arguments.\nusage: (% number number)")
-		return Value{}
-	}
+	if !require_arg_count(args, 2, "`%` expects two arguments.\nusage: (% number number)") { return Value{} }
 	return op_mod(args[0], args[1])
 }
 
 // (abs number) number; Absolute value.
 native_abs :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`abs` expects one argument.\nusage: (abs number)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`abs` expects one argument.\nusage: (abs number)") { return Value{} }
 
 	int_value, is_int := args[0].(i64)
 	if is_int {
@@ -658,10 +717,7 @@ native_abs :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (min number number...) number; Smallest numeric argument.
 native_min :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) < 2 {
-		runtime_error("`min` expects two or more arguments.\nusage: (min number number...)")
-		return Value{}
-	}
+	if !require_min_arg_count(args, 2, "`min` expects two or more arguments.\nusage: (min number number...)") { return Value{} }
 
 	if !value_is_number(args[0]) {
 		runtime_error("`min` expected int or float arguments.")
@@ -699,10 +755,7 @@ native_min :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (max number number...) number; Largest numeric argument.
 native_max :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) < 2 {
-		runtime_error("`max` expects two or more arguments.\nusage: (max number number...)")
-		return Value{}
-	}
+	if !require_min_arg_count(args, 2, "`max` expects two or more arguments.\nusage: (max number number...)") { return Value{} }
 
 	if !value_is_number(args[0]) {
 		runtime_error("`max` expected int or float arguments.")
@@ -740,10 +793,7 @@ native_max :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (clamp number number number) number; Constrain a number between inclusive bounds.
 native_clamp :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 3 {
-		runtime_error("`clamp` expects three arguments.\nusage: (clamp number number number)")
-		return Value{}
-	}
+	if !require_arg_count(args, 3, "`clamp` expects three arguments.\nusage: (clamp number number number)") { return Value{} }
 
 	if !value_is_number(args[0]) {
 		runtime_error("`clamp` expected int or float arguments.")
@@ -791,101 +841,68 @@ native_clamp :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (= left right) bool; true if values are equal by Obel equality.
 native_equal :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 2 {
-		runtime_error("`=` expects two arguments.\nusage: (= value value)")
-		return Value{}
-	}
+	if !require_arg_count(args, 2, "`=` expects two arguments.\nusage: (= value value)") { return Value{} }
 	return op_equal(args[0], args[1])
 }
 
 // (!= left right) bool; true if values are not equal by Obel equality.
 native_not_equal :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 2 {
-		runtime_error("`!=` expects two arguments.\nusage: (!= value value)")
-		return Value{}
-	}
+	if !require_arg_count(args, 2, "`!=` expects two arguments.\nusage: (!= value value)") { return Value{} }
 	return Value(bool(!values_equal(args[0], args[1])))
 }
 
 // (< left right) bool; Numeric less-than.
 native_less :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 2 {
-		runtime_error("`<` expects two arguments.\nusage: (< number number)")
-		return Value{}
-	}
+	if !require_arg_count(args, 2, "`<` expects two arguments.\nusage: (< number number)") { return Value{} }
 	return Value(bool(compare_numbers(args[0], args[1], .LESS)))
 }
 
 // (<= left right) bool; Numeric less-than-or-equal.
 native_less_equal :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 2 {
-		runtime_error("`<=` expects two arguments.\nusage: (<= number number)")
-		return Value{}
-	}
+	if !require_arg_count(args, 2, "`<=` expects two arguments.\nusage: (<= number number)") { return Value{} }
 	return Value(bool(compare_numbers(args[0], args[1], .LESS_EQUAL)))
 }
 
 // (> left right) bool; Numeric greater-than.
 native_greater :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 2 {
-		runtime_error("`>` expects two arguments.\nusage: (> number number)")
-		return Value{}
-	}
+	if !require_arg_count(args, 2, "`>` expects two arguments.\nusage: (> number number)") { return Value{} }
 	return Value(bool(compare_numbers(args[0], args[1], .GREATER)))
 }
 
 // (>= left right) bool; Numeric greater-than-or-equal.
 native_greater_equal :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 2 {
-		runtime_error("`>=` expects two arguments.\nusage: (>= number number)")
-		return Value{}
-	}
+	if !require_arg_count(args, 2, "`>=` expects two arguments.\nusage: (>= number number)") { return Value{} }
 	return Value(bool(compare_numbers(args[0], args[1], .GREATER_EQUAL)))
 }
 
 // (not value) bool; true if value is falsey.
 native_not :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`not` expects one argument.\nusage: (not value)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`not` expects one argument.\nusage: (not value)") { return Value{} }
 	return op_not(args[0])
 }
 
 // (nil? value) bool; true if value is nil.
 native_nil_predicate :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`nil?` expects one argument.\nusage: (nil? value)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`nil?` expects one argument.\nusage: (nil? value)") { return Value{} }
 	return Value(bool(args[0] == nil))
 }
 
 // (bool? value) bool; true if value is bool.
 native_bool_predicate :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`bool?` expects one argument.\nusage: (bool? value)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`bool?` expects one argument.\nusage: (bool? value)") { return Value{} }
 	_, is_bool := args[0].(bool)
 	return Value(bool(is_bool))
 }
 
 // (number? value) bool; true if value is int or float.
 native_number_predicate :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`number?` expects one argument.\nusage: (number? value)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`number?` expects one argument.\nusage: (number? value)") { return Value{} }
 	return Value(bool(value_is_number(args[0])))
 }
 
 // (number value) number|nil; Parse or pass through an Obel number.
 native_number :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`number` expects one argument.\nusage: (number value)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`number` expects one argument.\nusage: (number value)") { return Value{} }
 
 	value := args[0]
 	if value == nil { return Value{} }
@@ -910,69 +927,48 @@ native_number :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (int? value) bool; true if value is int.
 native_int_predicate :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`int?` expects one argument.\nusage: (int? value)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`int?` expects one argument.\nusage: (int? value)") { return Value{} }
 	_, is_int := args[0].(i64)
 	return Value(bool(is_int))
 }
 
 // (float? value) bool; true if value is float.
 native_float_predicate :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`float?` expects one argument.\nusage: (float? value)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`float?` expects one argument.\nusage: (float? value)") { return Value{} }
 	_, is_float := args[0].(f64)
 	return Value(bool(is_float))
 }
 
 // (str? value) bool; true if value is string.
 native_string_predicate :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`str?` expects one argument.\nusage: (str? value)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`str?` expects one argument.\nusage: (str? value)") { return Value{} }
 	object, is_object := args[0].(^Object)
 	return Value(bool(is_object && object.kind == .STRING))
 }
 
 // (vec? value) bool; true if value is vector.
 native_vector_predicate :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`vec?` expects one argument.\nusage: (vec? value)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`vec?` expects one argument.\nusage: (vec? value)") { return Value{} }
 	object, is_object := args[0].(^Object)
 	return Value(bool(is_object && object.kind == .VECTOR))
 }
 
 // (map? value) bool; true if value is map.
 native_map_predicate :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`map?` expects one argument.\nusage: (map? value)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`map?` expects one argument.\nusage: (map? value)") { return Value{} }
 	object, is_object := args[0].(^Object)
 	return Value(bool(is_object && object.kind == .MAP))
 }
 
 // (fn? value) bool; true if value is a native or Obel function.
 native_function_predicate :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`fn?` expects one argument.\nusage: (fn? value)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`fn?` expects one argument.\nusage: (fn? value)") { return Value{} }
 	return Value(bool(value_is_function(args[0])))
 }
 
 // (empty? value) bool; true if a string, vector, or map has no contents.
 native_empty_predicate :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`empty?` expects one argument.\nusage: (empty? value)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`empty?` expects one argument.\nusage: (empty? value)") { return Value{} }
 
 	object, is_object := args[0].(^Object)
 	if !is_object {
@@ -997,19 +993,13 @@ native_empty_predicate :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (len value) int; Length of a string, vector, or map.
 native_len :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`len` expects one argument.\nusage: (len value)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`len` expects one argument.\nusage: (len value)") { return Value{} }
 	return op_len(args[0])
 }
 
 // (copy value) value; Shallow copy of a vector or map.
 native_copy :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`copy` expects one argument.\nusage: (copy value)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`copy` expects one argument.\nusage: (copy value)") { return Value{} }
 
 	object, is_object := args[0].(^Object)
 	if !is_object {
@@ -1050,10 +1040,7 @@ native_copy :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (clear value) value; Empty a vector or map in place and return it.
 native_clear :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`clear` expects one argument.\nusage: (clear value)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`clear` expects one argument.\nusage: (clear value)") { return Value{} }
 
 	object, is_object := args[0].(^Object)
 	if !is_object {
@@ -1088,10 +1075,7 @@ native_clear :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (type value) string; Runtime type name.
 native_type :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`type` expects one argument.\nusage: (type value)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`type` expects one argument.\nusage: (type value)") { return Value{} }
 
 	value := args[0]
 	type_name: string
@@ -1152,10 +1136,7 @@ native_str :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (assert condition message?) nil; Runtime error if condition is falsey.
 native_assert :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) < 1 || len(args) > 2 {
-		runtime_error("`assert` expects condition and optional message.\nusage: (assert condition message?)")
-		return Value{}
-	}
+	if !require_arg_count_range(args, 1, 2, "`assert` expects condition and optional message.\nusage: (assert condition message?)") { return Value{} }
 
 	if !value_is_falsey(args[0]) { return Value{} }
 
@@ -1172,10 +1153,7 @@ native_assert :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (error message) never; Raise a runtime error using the display text of message.
 native_error :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`error` expects one argument.\nusage: (error message)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`error` expects one argument.\nusage: (error message)") { return Value{} }
 
 	message := value_display_text(args[0])
 	runtime_error(message)
@@ -1185,10 +1163,7 @@ native_error :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (push vector value...) vector; Append values to vector in place.
 native_push :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) < 2 {
-		runtime_error("`push` expects vector and one or more values.\nusage: (push vector value value...)")
-		return Value{}
-	}
+	if !require_min_arg_count(args, 2, "`push` expects vector and one or more values.\nusage: (push vector value value...)") { return Value{} }
 
 	vector_value := args[0]
 	for i := 1; i < len(args); i += 1 {
@@ -1201,34 +1176,20 @@ native_push :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (pop vector) value; Remove and return the last vector item.
 native_pop :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`pop` expects one argument.\nusage: (pop vector)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`pop` expects one argument.\nusage: (pop vector)") { return Value{} }
 
 	return op_pop(args[0])
 }
 
 // (insert vector index value) vector; Insert value into vector at index.
 native_insert :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 3 {
-		runtime_error("`insert` expects vector, index, and value.\nusage: (insert vector index value)")
-		return Value{}
-	}
+	if !require_arg_count(args, 3, "`insert` expects vector, index, and value.\nusage: (insert vector index value)") { return Value{} }
 
-	object, is_object := args[0].(^Object)
-	if !is_object || object.kind != .VECTOR {
-		runtime_error("`insert` expected vector as first argument.")
-		return Value{}
-	}
+	vector, vector_ok := require_vector_arg(args, 0, "insert", "first")
+	if !vector_ok { return Value{} }
+	index, index_ok := require_int_arg(args, 1, "insert", "second")
+	if !index_ok { return Value{} }
 
-	index, is_int := args[1].(i64)
-	if !is_int {
-		runtime_error("`insert` expected int as index.")
-		return Value{}
-	}
-
-	vector := cast(^VectorObject)object
 	if index < 0 || index > i64(len(vector.items)) {
 		runtime_error("`insert` index out of range.")
 		return Value{}
@@ -1240,24 +1201,13 @@ native_insert :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (remove vector index) value; Remove and return vector item at index.
 native_remove :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 2 {
-		runtime_error("`remove` expects vector and index.\nusage: (remove vector index)")
-		return Value{}
-	}
+	if !require_arg_count(args, 2, "`remove` expects vector and index.\nusage: (remove vector index)") { return Value{} }
 
-	object, is_object := args[0].(^Object)
-	if !is_object || object.kind != .VECTOR {
-		runtime_error("`remove` expected vector as first argument.")
-		return Value{}
-	}
+	vector, vector_ok := require_vector_arg(args, 0, "remove", "first")
+	if !vector_ok { return Value{} }
+	index, index_ok := require_int_arg(args, 1, "remove", "second")
+	if !index_ok { return Value{} }
 
-	index, is_int := args[1].(i64)
-	if !is_int {
-		runtime_error("`remove` expected int as index.")
-		return Value{}
-	}
-
-	vector := cast(^VectorObject)object
 	if index < 0 || index >= i64(len(vector.items)) {
 		runtime_error("`remove` index out of range.")
 		return Value{}
@@ -1270,25 +1220,15 @@ native_remove :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (slice vector start count) vector; Copy a vector range.
 native_slice :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 3 {
-		runtime_error("`slice` expects vector, start, and count.\nusage: (slice vector start count)")
-		return Value{}
-	}
+	if !require_arg_count(args, 3, "`slice` expects vector, start, and count.\nusage: (slice vector start count)") { return Value{} }
 
-	object, is_object := args[0].(^Object)
-	if !is_object || object.kind != .VECTOR {
-		runtime_error("`slice` expected vector as first argument.")
-		return Value{}
-	}
+	vector, vector_ok := require_vector_arg(args, 0, "slice", "first")
+	if !vector_ok { return Value{} }
+	start, start_ok := require_int_arg(args, 1, "slice", "second")
+	if !start_ok { return Value{} }
+	count, count_ok := require_int_arg(args, 2, "slice", "third")
+	if !count_ok { return Value{} }
 
-	start, start_is_int := args[1].(i64)
-	count, count_is_int := args[2].(i64)
-	if !start_is_int || !count_is_int {
-		runtime_error("`slice` expected int start and count.")
-		return Value{}
-	}
-
-	vector := cast(^VectorObject)object
 	length := i64(len(vector.items))
 	if start < 0 || count < 0 || start > length || count > length - start {
 		runtime_error("`slice` range out of bounds.")
@@ -1306,18 +1246,10 @@ native_slice :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (keys map) vector; Map keys in unspecified order.
 native_keys :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`keys` expects one argument.\nusage: (keys map)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`keys` expects one argument.\nusage: (keys map)") { return Value{} }
 
-	object, is_object := args[0].(^Object)
-	if !is_object || object.kind != .MAP {
-		runtime_error("`keys` expected map as argument.")
-		return Value{}
-	}
-
-	map_object := cast(^MapObject)object
+	map_object, map_ok := require_map_arg(args, 0, "keys", "first")
+	if !map_ok { return Value{} }
 	items := make([dynamic]Value)
 	reserve(&items, map_object.count)
 
@@ -1332,18 +1264,10 @@ native_keys :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (vals map) vector; Map values in unspecified order.
 native_vals :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`vals` expects one argument.\nusage: (vals map)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`vals` expects one argument.\nusage: (vals map)") { return Value{} }
 
-	object, is_object := args[0].(^Object)
-	if !is_object || object.kind != .MAP {
-		runtime_error("`vals` expected map as argument.")
-		return Value{}
-	}
-
-	map_object := cast(^MapObject)object
+	map_object, map_ok := require_map_arg(args, 0, "vals", "first")
+	if !map_ok { return Value{} }
 	items := make([dynamic]Value)
 	reserve(&items, map_object.count)
 
@@ -1376,27 +1300,16 @@ map_pairs_snapshot :: proc(map_object: ^MapObject) -> ^VectorObject {
 
 // (pairs map) vector; Map key/value pairs as two-item vectors, in unspecified order.
 native_pairs :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`pairs` expects one argument.\nusage: (pairs map)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`pairs` expects one argument.\nusage: (pairs map)") { return Value{} }
 
-	object, is_object := args[0].(^Object)
-	if !is_object || object.kind != .MAP {
-		runtime_error("`pairs` expected map as argument.")
-		return Value{}
-	}
-
-	map_object := cast(^MapObject)object
+	map_object, map_ok := require_map_arg(args, 0, "pairs", "first")
+	if !map_ok { return Value{} }
 	return Value(cast(^Object)map_pairs_snapshot(map_object))
 }
 
 // (merge map map...) map; Fresh map with later maps overriding earlier maps.
 native_merge :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) < 2 {
-		runtime_error("`merge` expects two or more maps.\nusage: (merge map map...)")
-		return Value{}
-	}
+	if !require_min_arg_count(args, 2, "`merge` expects two or more maps.\nusage: (merge map map...)") { return Value{} }
 
 	entry_capacity := 0
 	for arg in args {
@@ -1455,14 +1368,9 @@ collection_callback_items :: proc(collection: Value, proc_name: string) -> ^Vect
 
 // (map f coll) vector; Transform each collection item.
 native_map :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 2 {
-		runtime_error("`map` expects two arguments.\nusage: (map f coll)")
-		return Value{}
-	}
-	if !value_is_function(args[0]) {
-		runtime_error("`map` expected function as first argument.")
-		return Value{}
-	}
+	if !require_arg_count(args, 2, "`map` expects two arguments.\nusage: (map f coll)") { return Value{} }
+	function, function_ok := require_function_arg(args, 0, "map", "first")
+	if !function_ok { return Value{} }
 
 	item_vector := collection_callback_items(args[1], "map")
 	if item_vector == nil { return Value{} }
@@ -1479,7 +1387,7 @@ native_map :: proc(vm: ^VM, args: []Value) -> Value {
 		}
 
 		call_args[0] = item_vector.items[i]
-		result := call_function_from_native(vm, args[0], call_args[:])
+		result := call_function_from_native(vm, function, call_args[:])
 		if vm.error_string != "" { return Value{} }
 
 		append(&results, result)
@@ -1490,14 +1398,9 @@ native_map :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (filter pred coll) vector; Keep original items where pred returns truthy.
 native_filter :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 2 {
-		runtime_error("`filter` expects two arguments.\nusage: (filter pred coll)")
-		return Value{}
-	}
-	if !value_is_function(args[0]) {
-		runtime_error("`filter` expected function as first argument.")
-		return Value{}
-	}
+	if !require_arg_count(args, 2, "`filter` expects two arguments.\nusage: (filter pred coll)") { return Value{} }
+	predicate, predicate_ok := require_function_arg(args, 0, "filter", "first")
+	if !predicate_ok { return Value{} }
 
 	item_vector := collection_callback_items(args[1], "filter")
 	if item_vector == nil { return Value{} }
@@ -1514,7 +1417,7 @@ native_filter :: proc(vm: ^VM, args: []Value) -> Value {
 
 		item := item_vector.items[i]
 		call_args[0] = item
-		keep := call_function_from_native(vm, args[0], call_args[:])
+		keep := call_function_from_native(vm, predicate, call_args[:])
 		if vm.error_string != "" { return Value{} }
 
 		if !value_is_falsey(keep) {
@@ -1527,14 +1430,9 @@ native_filter :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (reduce f start coll) value; Fold collection items through f.
 native_reduce :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 3 {
-		runtime_error("`reduce` expects three arguments.\nusage: (reduce f start coll)")
-		return Value{}
-	}
-	if !value_is_function(args[0]) {
-		runtime_error("`reduce` expected function as first argument.")
-		return Value{}
-	}
+	if !require_arg_count(args, 3, "`reduce` expects three arguments.\nusage: (reduce f start coll)") { return Value{} }
+	function, function_ok := require_function_arg(args, 0, "reduce", "first")
+	if !function_ok { return Value{} }
 
 	item_vector := collection_callback_items(args[2], "reduce")
 	if item_vector == nil { return Value{} }
@@ -1551,7 +1449,7 @@ native_reduce :: proc(vm: ^VM, args: []Value) -> Value {
 
 		call_args[0] = result
 		call_args[1] = item_vector.items[i]
-		result = call_function_from_native(vm, args[0], call_args[:])
+		result = call_function_from_native(vm, function, call_args[:])
 		if vm.error_string != "" { return Value{} }
 	}
 
@@ -1560,14 +1458,9 @@ native_reduce :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (find pred coll) value|nil; First original item where pred returns truthy.
 native_find :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 2 {
-		runtime_error("`find` expects two arguments.\nusage: (find pred coll)")
-		return Value{}
-	}
-	if !value_is_function(args[0]) {
-		runtime_error("`find` expected function as first argument.")
-		return Value{}
-	}
+	if !require_arg_count(args, 2, "`find` expects two arguments.\nusage: (find pred coll)") { return Value{} }
+	predicate, predicate_ok := require_function_arg(args, 0, "find", "first")
+	if !predicate_ok { return Value{} }
 
 	item_vector := collection_callback_items(args[1], "find")
 	if item_vector == nil { return Value{} }
@@ -1582,7 +1475,7 @@ native_find :: proc(vm: ^VM, args: []Value) -> Value {
 
 		item := item_vector.items[i]
 		call_args[0] = item
-		found := call_function_from_native(vm, args[0], call_args[:])
+		found := call_function_from_native(vm, predicate, call_args[:])
 		if vm.error_string != "" { return Value{} }
 
 		if !value_is_falsey(found) {
@@ -1595,14 +1488,9 @@ native_find :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (pick f coll) value|nil; First truthy value produced by f.
 native_pick :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 2 {
-		runtime_error("`pick` expects two arguments.\nusage: (pick f coll)")
-		return Value{}
-	}
-	if !value_is_function(args[0]) {
-		runtime_error("`pick` expected function as first argument.")
-		return Value{}
-	}
+	if !require_arg_count(args, 2, "`pick` expects two arguments.\nusage: (pick f coll)") { return Value{} }
+	function, function_ok := require_function_arg(args, 0, "pick", "first")
+	if !function_ok { return Value{} }
 
 	item_vector := collection_callback_items(args[1], "pick")
 	if item_vector == nil { return Value{} }
@@ -1616,7 +1504,7 @@ native_pick :: proc(vm: ^VM, args: []Value) -> Value {
 		}
 
 		call_args[0] = item_vector.items[i]
-		result := call_function_from_native(vm, args[0], call_args[:])
+		result := call_function_from_native(vm, function, call_args[:])
 		if vm.error_string != "" { return Value{} }
 
 		if !value_is_falsey(result) {
@@ -1723,21 +1611,15 @@ stable_sort_order :: proc(vm: ^VM, values: []Value, comparator: Value) -> [dynam
 // (sort vector) vector; Stable sort with default number/string ordering.
 // (sort comp-fn vector) vector; Stable sort with a comparator.
 native_sort :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 && len(args) != 2 {
-		runtime_error("`sort` expects one or two arguments.\nusage: (sort vector)\n       (sort comp-fn vector)")
-		return Value{}
-	}
+	if !require_arg_count_range(args, 1, 2, "`sort` expects one or two arguments.\nusage: (sort vector)\n       (sort comp-fn vector)") { return Value{} }
 
 	comparator := Value{}
 	vector_value := args[0]
 
 	if len(args) == 2 {
-		if !value_is_function(args[0]) {
-			runtime_error("`sort` expected function as first argument.")
-			return Value{}
-		}
-
-		comparator = args[0]
+		parsed_comparator, comparator_ok := require_function_arg(args, 0, "sort", "first")
+		if !comparator_ok { return Value{} }
+		comparator = parsed_comparator
 		vector_value = args[1]
 	}
 
@@ -1793,27 +1675,17 @@ native_sort :: proc(vm: ^VM, args: []Value) -> Value {
 // (sort-by key-fn vector) vector; Stable sort by generated keys.
 // (sort-by key-fn comp-fn vector) vector; Stable sort by generated keys with a comparator.
 native_sort_by :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 2 && len(args) != 3 {
-		runtime_error("`sort-by` expects two or three arguments.\nusage: (sort-by key-fn vector)\n       (sort-by key-fn comp-fn vector)")
-		return Value{}
-	}
+	if !require_arg_count_range(args, 2, 3, "`sort-by` expects two or three arguments.\nusage: (sort-by key-fn vector)\n       (sort-by key-fn comp-fn vector)") { return Value{} }
+	key_function, key_function_ok := require_function_arg(args, 0, "sort-by", "first")
+	if !key_function_ok { return Value{} }
 
-	if !value_is_function(args[0]) {
-		runtime_error("`sort-by` expected function as first argument.")
-		return Value{}
-	}
-
-	key_function := args[0]
 	comparator := Value{}
 	vector_value := args[1]
 
 	if len(args) == 3 {
-		if !value_is_function(args[1]) {
-			runtime_error("`sort-by` expected function as second argument.")
-			return Value{}
-		}
-
-		comparator = args[1]
+		parsed_comparator, comparator_ok := require_function_arg(args, 1, "sort-by", "second")
+		if !comparator_ok { return Value{} }
+		comparator = parsed_comparator
 		vector_value = args[2]
 	}
 
@@ -1919,10 +1791,7 @@ install_host_module :: proc(vm: ^VM, id: string, exports: []Binding) {
 
 // (has? text part) bool; true if text contains part.
 native_str_has :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 2 {
-		runtime_error("`str/has?` expects two arguments.\nusage: (str/has? text part)")
-		return Value{}
-	}
+	if !require_arg_count(args, 2, "`str/has?` expects two arguments.\nusage: (str/has? text part)") { return Value{} }
 
 	text, text_ok := require_string_arg(args, 0, "str/has?", "first")
 	if !text_ok { return Value{} }
@@ -1934,10 +1803,7 @@ native_str_has :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (prefix? text prefix) bool; true if text starts with prefix.
 native_str_prefix :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 2 {
-		runtime_error("`str/prefix?` expects two arguments.\nusage: (str/prefix? text prefix)")
-		return Value{}
-	}
+	if !require_arg_count(args, 2, "`str/prefix?` expects two arguments.\nusage: (str/prefix? text prefix)") { return Value{} }
 
 	text, text_ok := require_string_arg(args, 0, "str/prefix?", "first")
 	if !text_ok { return Value{} }
@@ -1949,10 +1815,7 @@ native_str_prefix :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (suffix? text suffix) bool; true if text ends with suffix.
 native_str_suffix :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 2 {
-		runtime_error("`str/suffix?` expects two arguments.\nusage: (str/suffix? text suffix)")
-		return Value{}
-	}
+	if !require_arg_count(args, 2, "`str/suffix?` expects two arguments.\nusage: (str/suffix? text suffix)") { return Value{} }
 
 	text, text_ok := require_string_arg(args, 0, "str/suffix?", "first")
 	if !text_ok { return Value{} }
@@ -1964,10 +1827,7 @@ native_str_suffix :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (split text separator) vector; Split text by separator into strings.
 native_str_split :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 2 {
-		runtime_error("`str/split` expects two arguments.\nusage: (str/split text separator)")
-		return Value{}
-	}
+	if !require_arg_count(args, 2, "`str/split` expects two arguments.\nusage: (str/split text separator)") { return Value{} }
 
 	text, text_ok := require_string_arg(args, 0, "str/split", "first")
 	if !text_ok { return Value{} }
@@ -1992,21 +1852,13 @@ native_str_split :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (join parts separator) string; Join a vector of strings with separator.
 native_str_join :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 2 {
-		runtime_error("`str/join` expects vector and separator.\nusage: (str/join vector separator)")
-		return Value{}
-	}
+	if !require_arg_count(args, 2, "`str/join` expects vector and separator.\nusage: (str/join vector separator)") { return Value{} }
 
-	object, is_object := args[0].(^Object)
-	if !is_object || object.kind != .VECTOR {
-		runtime_error("`str/join` expected vector as first argument.")
-		return Value{}
-	}
-
+	vector, vector_ok := require_vector_arg(args, 0, "str/join", "first")
+	if !vector_ok { return Value{} }
 	separator, separator_ok := require_string_arg(args, 1, "str/join", "second")
 	if !separator_ok { return Value{} }
 
-	vector := cast(^VectorObject)object
 	parts := make([dynamic]string)
 	defer delete(parts)
 
@@ -2029,10 +1881,7 @@ native_str_join :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (find text part) int|nil; First byte index of part in text.
 native_str_find :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 2 {
-		runtime_error("`str/find` expects two arguments.\nusage: (str/find text part)")
-		return Value{}
-	}
+	if !require_arg_count(args, 2, "`str/find` expects two arguments.\nusage: (str/find text part)") { return Value{} }
 
 	text, text_ok := require_string_arg(args, 0, "str/find", "first")
 	if !text_ok { return Value{} }
@@ -2049,10 +1898,7 @@ native_str_find :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (slice text start count) string; Copy a byte range from text.
 native_str_slice :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 3 {
-		runtime_error("`str/slice` expects string, start, and count.\nusage: (str/slice text start count)")
-		return Value{}
-	}
+	if !require_arg_count(args, 3, "`str/slice` expects string, start, and count.\nusage: (str/slice text start count)") { return Value{} }
 
 	text, text_ok := require_string_arg(args, 0, "str/slice", "first")
 	if !text_ok { return Value{} }
@@ -2072,10 +1918,7 @@ native_str_slice :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (replace text old new) string; Replace all old text with new text.
 native_str_replace :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 3 {
-		runtime_error("`str/replace` expects string, old text, and new text.\nusage: (str/replace text old new)")
-		return Value{}
-	}
+	if !require_arg_count(args, 3, "`str/replace` expects string, old text, and new text.\nusage: (str/replace text old new)") { return Value{} }
 
 	text, text_ok := require_string_arg(args, 0, "str/replace", "first")
 	if !text_ok { return Value{} }
@@ -2096,10 +1939,7 @@ native_str_replace :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (trim text) string; Trim surrounding whitespace.
 native_str_trim :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`str/trim` expects one argument.\nusage: (str/trim text)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`str/trim` expects one argument.\nusage: (str/trim text)") { return Value{} }
 
 	text, text_ok := require_string_arg(args, 0, "str/trim", "first")
 	if !text_ok { return Value{} }
@@ -2109,10 +1949,7 @@ native_str_trim :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (lower text) string; Lowercase text.
 native_str_lower :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`str/lower` expects one argument.\nusage: (str/lower text)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`str/lower` expects one argument.\nusage: (str/lower text)") { return Value{} }
 
 	text, text_ok := require_string_arg(args, 0, "str/lower", "first")
 	if !text_ok { return Value{} }
@@ -2129,10 +1966,7 @@ native_str_lower :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (upper text) string; Uppercase text.
 native_str_upper :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`str/upper` expects one argument.\nusage: (str/upper text)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`str/upper` expects one argument.\nusage: (str/upper text)") { return Value{} }
 
 	text, text_ok := require_string_arg(args, 0, "str/upper", "first")
 	if !text_ok { return Value{} }
@@ -2149,10 +1983,7 @@ native_str_upper :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (byte text index) int; Byte value at index.
 native_str_byte :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 2 {
-		runtime_error("`str/byte` expects string and index.\nusage: (str/byte text index)")
-		return Value{}
-	}
+	if !require_arg_count(args, 2, "`str/byte` expects string and index.\nusage: (str/byte text index)") { return Value{} }
 
 	text, text_ok := require_string_arg(args, 0, "str/byte", "first")
 	if !text_ok { return Value{} }
@@ -2169,10 +2000,7 @@ native_str_byte :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (bytes text) vector; Byte values of text.
 native_str_bytes :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`str/bytes` expects one argument.\nusage: (str/bytes text)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`str/bytes` expects one argument.\nusage: (str/bytes text)") { return Value{} }
 
 	text, text_ok := require_string_arg(args, 0, "str/bytes", "first")
 	if !text_ok { return Value{} }
@@ -2217,10 +2045,7 @@ native_path_join :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (base path) string; Final path component.
 native_path_base :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`path/base` expects one argument.\nusage: (path/base path)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`path/base` expects one argument.\nusage: (path/base path)") { return Value{} }
 
 	path, path_ok := require_string_arg(args, 0, "path/base", "first")
 	if !path_ok { return Value{} }
@@ -2230,10 +2055,7 @@ native_path_base :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (dir path) string; Parent path portion.
 native_path_dir :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`path/dir` expects one argument.\nusage: (path/dir path)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`path/dir` expects one argument.\nusage: (path/dir path)") { return Value{} }
 
 	path, path_ok := require_string_arg(args, 0, "path/dir", "first")
 	if !path_ok { return Value{} }
@@ -2244,10 +2066,7 @@ native_path_dir :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (ext path) string; File extension, including the dot.
 native_path_ext :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`path/ext` expects one argument.\nusage: (path/ext path)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`path/ext` expects one argument.\nusage: (path/ext path)") { return Value{} }
 
 	path, path_ok := require_string_arg(args, 0, "path/ext", "first")
 	if !path_ok { return Value{} }
@@ -2257,10 +2076,7 @@ native_path_ext :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (stem path) string; Final path component without extension.
 native_path_stem :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`path/stem` expects one argument.\nusage: (path/stem path)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`path/stem` expects one argument.\nusage: (path/stem path)") { return Value{} }
 
 	path, path_ok := require_string_arg(args, 0, "path/stem", "first")
 	if !path_ok { return Value{} }
@@ -2274,10 +2090,7 @@ native_path_stem :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (clean path) string; Lexically clean redundant path components.
 native_path_clean :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`path/clean` expects one argument.\nusage: (path/clean path)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`path/clean` expects one argument.\nusage: (path/clean path)") { return Value{} }
 
 	path, path_ok := require_string_arg(args, 0, "path/clean", "first")
 	if !path_ok { return Value{} }
@@ -2294,10 +2107,7 @@ native_path_clean :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (abs path) string; Absolute path against the current working directory.
 native_path_abs :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`path/abs` expects one argument.\nusage: (path/abs path)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`path/abs` expects one argument.\nusage: (path/abs path)") { return Value{} }
 
 	path, path_ok := require_string_arg(args, 0, "path/abs", "first")
 	if !path_ok { return Value{} }
@@ -2317,10 +2127,7 @@ native_path_abs :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (argv) vector; Raw process arguments.
 native_os_argv :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 0 {
-		runtime_error("`os/argv` expects no arguments.\nusage: (os/argv)")
-		return Value{}
-	}
+	if !require_arg_count(args, 0, "`os/argv` expects no arguments.\nusage: (os/argv)") { return Value{} }
 
 	items := make([dynamic]Value)
 	reserve(&items, len(vm.argv))
@@ -2333,10 +2140,7 @@ native_os_argv :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (args) vector; Script arguments.
 native_os_args :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 0 {
-		runtime_error("`os/args` expects no arguments.\nusage: (os/args)")
-		return Value{}
-	}
+	if !require_arg_count(args, 0, "`os/args` expects no arguments.\nusage: (os/args)") { return Value{} }
 
 	items := make([dynamic]Value)
 	reserve(&items, len(vm.argv[vm.args_start:]))
@@ -2349,10 +2153,7 @@ native_os_args :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (env name) string|nil; Environment variable value, or nil if unset.
 native_os_env :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`os/env` expects one argument.\nusage: (os/env name)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`os/env` expects one argument.\nusage: (os/env name)") { return Value{} }
 
 	name, name_ok := require_string_arg(args, 0, "os/env", "first")
 	if !name_ok { return Value{} }
@@ -2368,10 +2169,7 @@ native_os_env :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (set-env name value) [true nil]|[nil err]; Set an environment variable.
 native_os_set_env :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 2 {
-		runtime_error("`os/set-env` expects environment variable name and value.\nusage: (os/set-env name value)")
-		return Value{}
-	}
+	if !require_arg_count(args, 2, "`os/set-env` expects environment variable name and value.\nusage: (os/set-env name value)") { return Value{} }
 
 	name, name_ok := require_string_arg(args, 0, "os/set-env", "first")
 	if !name_ok { return Value{} }
@@ -2380,24 +2178,15 @@ native_os_set_env :: proc(vm: ^VM, args: []Value) -> Value {
 
 	set_error := os.set_env(name, value)
 	if set_error != nil {
-		items := make([dynamic]Value)
-		reserve(&items, 2)
-		append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`os/set-env` failed for `%s`: %v", name, set_error))))
-		return Value(cast(^Object)new_vector_object(items))
+		return value_err_vector(Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`os/set-env` failed for `%s`: %v", name, set_error))))
 	}
 
-	items := make([dynamic]Value)
-	reserve(&items, 2)
-	append(&items, Value(bool(true)), Value{})
-	return Value(cast(^Object)new_vector_object(items))
+	return value_err_vector(Value(bool(true)), Value{})
 }
 
 // (exit code) never; Exit the process.
 native_os_exit :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`os/exit` expects one argument.\nusage: (os/exit code)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`os/exit` expects one argument.\nusage: (os/exit code)") { return Value{} }
 
 	code, code_ok := require_int_arg(args, 0, "os/exit", "first")
 	if !code_ok { return Value{} }
@@ -2407,20 +2196,14 @@ native_os_exit :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (name) string; Operating system name.
 native_os_name :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 0 {
-		runtime_error("`os/name` expects no arguments.\nusage: (os/name)")
-		return Value{}
-	}
+	if !require_arg_count(args, 0, "`os/name` expects no arguments.\nusage: (os/name)") { return Value{} }
 
 	return Value(cast(^Object)new_string_object(ODIN_OS_STRING))
 }
 
 // (arch) string; CPU architecture name.
 native_os_arch :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 0 {
-		runtime_error("`os/arch` expects no arguments.\nusage: (os/arch)")
-		return Value{}
-	}
+	if !require_arg_count(args, 0, "`os/arch` expects no arguments.\nusage: (os/arch)") { return Value{} }
 
 	return Value(cast(^Object)new_string_object(ODIN_ARCH_STRING))
 }
@@ -2430,35 +2213,23 @@ native_os_arch :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (read-file path) [string nil]|[nil err]; Read a text file.
 native_fs_read_file :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`fs/read-file` expects one argument.\nusage: (fs/read-file path)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`fs/read-file` expects one argument.\nusage: (fs/read-file path)") { return Value{} }
 
 	path, path_ok := require_string_arg(args, 0, "fs/read-file", "first")
 	if !path_ok { return Value{} }
 
 	bytes, read_error := os.read_entire_file(path, context.allocator)
 	if read_error != nil {
-		items := make([dynamic]Value)
-		reserve(&items, 2)
-		append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`fs/read-file` failed for `%s`: %v", path, read_error))))
-		return Value(cast(^Object)new_vector_object(items))
+		return value_err_vector(Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`fs/read-file` failed for `%s`: %v", path, read_error))))
 	}
 	defer delete(bytes)
 
-	items := make([dynamic]Value)
-	reserve(&items, 2)
-	append(&items, Value(cast(^Object)new_string_object(string(bytes))), Value{})
-	return Value(cast(^Object)new_vector_object(items))
+	return value_err_vector(Value(cast(^Object)new_string_object(string(bytes))), Value{})
 }
 
 // (write-file path text) [true nil]|[nil err]; Write text to a file.
 native_fs_write_file :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 2 {
-		runtime_error("`fs/write-file` expects path and text.\nusage: (fs/write-file path text)")
-		return Value{}
-	}
+	if !require_arg_count(args, 2, "`fs/write-file` expects path and text.\nusage: (fs/write-file path text)") { return Value{} }
 
 	path, path_ok := require_string_arg(args, 0, "fs/write-file", "first")
 	if !path_ok { return Value{} }
@@ -2467,70 +2238,43 @@ native_fs_write_file :: proc(vm: ^VM, args: []Value) -> Value {
 
 	write_error := os.write_entire_file(path, text)
 	if write_error != nil {
-		items := make([dynamic]Value)
-		reserve(&items, 2)
-		append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`fs/write-file` failed for `%s`: %v", path, write_error))))
-		return Value(cast(^Object)new_vector_object(items))
+		return value_err_vector(Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`fs/write-file` failed for `%s`: %v", path, write_error))))
 	}
 
-	items := make([dynamic]Value)
-	reserve(&items, 2)
-	append(&items, Value(bool(true)), Value{})
-	return Value(cast(^Object)new_vector_object(items))
+	return value_err_vector(Value(bool(true)), Value{})
 }
 
 // (cwd) [string nil]|[nil err]; Current working directory.
 native_fs_cwd :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 0 {
-		runtime_error("`fs/cwd` expects no arguments.\nusage: (fs/cwd)")
-		return Value{}
-	}
+	if !require_arg_count(args, 0, "`fs/cwd` expects no arguments.\nusage: (fs/cwd)") { return Value{} }
 
 	cwd, cwd_error := os.get_working_directory(context.allocator)
 	if cwd_error != nil {
-		items := make([dynamic]Value)
-		reserve(&items, 2)
-		append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`fs/cwd` failed: %v", cwd_error))))
-		return Value(cast(^Object)new_vector_object(items))
+		return value_err_vector(Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`fs/cwd` failed: %v", cwd_error))))
 	}
 	defer delete(cwd)
 
-	items := make([dynamic]Value)
-	reserve(&items, 2)
-	append(&items, Value(cast(^Object)new_string_object(cwd)), Value{})
-	return Value(cast(^Object)new_vector_object(items))
+	return value_err_vector(Value(cast(^Object)new_string_object(cwd)), Value{})
 }
 
 // (set-cwd path) [true nil]|[nil err]; Change current working directory.
 native_fs_set_cwd :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`fs/set-cwd` expects one argument.\nusage: (fs/set-cwd path)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`fs/set-cwd` expects one argument.\nusage: (fs/set-cwd path)") { return Value{} }
 
 	path, path_ok := require_string_arg(args, 0, "fs/set-cwd", "first")
 	if !path_ok { return Value{} }
 
 	cwd_error := os.set_working_directory(path)
 	if cwd_error != nil {
-		items := make([dynamic]Value)
-		reserve(&items, 2)
-		append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`fs/set-cwd` failed for `%s`: %v", path, cwd_error))))
-		return Value(cast(^Object)new_vector_object(items))
+		return value_err_vector(Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`fs/set-cwd` failed for `%s`: %v", path, cwd_error))))
 	}
 
-	items := make([dynamic]Value)
-	reserve(&items, 2)
-	append(&items, Value(bool(true)), Value{})
-	return Value(cast(^Object)new_vector_object(items))
+	return value_err_vector(Value(bool(true)), Value{})
 }
 
 // (exists? path) bool; true if path exists.
 native_fs_exists :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`fs/exists?` expects one argument.\nusage: (fs/exists? path)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`fs/exists?` expects one argument.\nusage: (fs/exists? path)") { return Value{} }
 
 	path, path_ok := require_string_arg(args, 0, "fs/exists?", "first")
 	if !path_ok { return Value{} }
@@ -2540,10 +2284,7 @@ native_fs_exists :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (file? path) bool; true if path exists and is a file.
 native_fs_file :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`fs/file?` expects one argument.\nusage: (fs/file? path)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`fs/file?` expects one argument.\nusage: (fs/file? path)") { return Value{} }
 
 	path, path_ok := require_string_arg(args, 0, "fs/file?", "first")
 	if !path_ok { return Value{} }
@@ -2553,10 +2294,7 @@ native_fs_file :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (dir? path) bool; true if path exists and is a directory.
 native_fs_dir :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`fs/dir?` expects one argument.\nusage: (fs/dir? path)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`fs/dir?` expects one argument.\nusage: (fs/dir? path)") { return Value{} }
 
 	path, path_ok := require_string_arg(args, 0, "fs/dir?", "first")
 	if !path_ok { return Value{} }
@@ -2566,20 +2304,14 @@ native_fs_dir :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (list-dir path) [vector nil]|[nil err]; Direct directory entry names.
 native_fs_list_dir :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`fs/list-dir` expects one argument.\nusage: (fs/list-dir path)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`fs/list-dir` expects one argument.\nusage: (fs/list-dir path)") { return Value{} }
 
 	path, path_ok := require_string_arg(args, 0, "fs/list-dir", "first")
 	if !path_ok { return Value{} }
 
 	entries, list_error := os.read_all_directory_by_path(path, context.allocator)
 	if list_error != nil {
-		items := make([dynamic]Value)
-		reserve(&items, 2)
-		append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`fs/list-dir` failed for `%s`: %v", path, list_error))))
-		return Value(cast(^Object)new_vector_object(items))
+		return value_err_vector(Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`fs/list-dir` failed for `%s`: %v", path, list_error))))
 	}
 	defer os.file_info_slice_delete(entries, context.allocator)
 
@@ -2589,96 +2321,60 @@ native_fs_list_dir :: proc(vm: ^VM, args: []Value) -> Value {
 		append(&entry_items, Value(cast(^Object)new_string_object(entry.name)))
 	}
 
-	items := make([dynamic]Value)
-	reserve(&items, 2)
-	append(&items, Value(cast(^Object)new_vector_object(entry_items)), Value{})
-	return Value(cast(^Object)new_vector_object(items))
+	return value_err_vector(Value(cast(^Object)new_vector_object(entry_items)), Value{})
 }
 
 // (make-dir path) [true nil]|[nil err]; Create one directory level.
 native_fs_make_dir :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`fs/make-dir` expects one argument.\nusage: (fs/make-dir path)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`fs/make-dir` expects one argument.\nusage: (fs/make-dir path)") { return Value{} }
 
 	path, path_ok := require_string_arg(args, 0, "fs/make-dir", "first")
 	if !path_ok { return Value{} }
 
 	make_error := os.make_directory(path)
 	if make_error != nil {
-		items := make([dynamic]Value)
-		reserve(&items, 2)
-		append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`fs/make-dir` failed for `%s`: %v", path, make_error))))
-		return Value(cast(^Object)new_vector_object(items))
+		return value_err_vector(Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`fs/make-dir` failed for `%s`: %v", path, make_error))))
 	}
 
-	items := make([dynamic]Value)
-	reserve(&items, 2)
-	append(&items, Value(bool(true)), Value{})
-	return Value(cast(^Object)new_vector_object(items))
+	return value_err_vector(Value(bool(true)), Value{})
 }
 
 // (remove-file path) [true nil]|[nil err]; Remove a file.
 native_fs_remove_file :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`fs/remove-file` expects one argument.\nusage: (fs/remove-file path)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`fs/remove-file` expects one argument.\nusage: (fs/remove-file path)") { return Value{} }
 
 	path, path_ok := require_string_arg(args, 0, "fs/remove-file", "first")
 	if !path_ok { return Value{} }
 
 	if !os.is_file(path) {
-		items := make([dynamic]Value)
-		reserve(&items, 2)
-		append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`fs/remove-file` failed for `%s`: not a file", path))))
-		return Value(cast(^Object)new_vector_object(items))
+		return value_err_vector(Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`fs/remove-file` failed for `%s`: not a file", path))))
 	}
 
 	remove_error := os.remove(path)
 	if remove_error != nil {
-		items := make([dynamic]Value)
-		reserve(&items, 2)
-		append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`fs/remove-file` failed for `%s`: %v", path, remove_error))))
-		return Value(cast(^Object)new_vector_object(items))
+		return value_err_vector(Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`fs/remove-file` failed for `%s`: %v", path, remove_error))))
 	}
 
-	items := make([dynamic]Value)
-	reserve(&items, 2)
-	append(&items, Value(bool(true)), Value{})
-	return Value(cast(^Object)new_vector_object(items))
+	return value_err_vector(Value(bool(true)), Value{})
 }
 
 // (remove-dir path) [true nil]|[nil err]; Remove an empty directory.
 native_fs_remove_dir :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`fs/remove-dir` expects one argument.\nusage: (fs/remove-dir path)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`fs/remove-dir` expects one argument.\nusage: (fs/remove-dir path)") { return Value{} }
 
 	path, path_ok := require_string_arg(args, 0, "fs/remove-dir", "first")
 	if !path_ok { return Value{} }
 
 	if !os.is_dir(path) {
-		items := make([dynamic]Value)
-		reserve(&items, 2)
-		append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`fs/remove-dir` failed for `%s`: not a directory", path))))
-		return Value(cast(^Object)new_vector_object(items))
+		return value_err_vector(Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`fs/remove-dir` failed for `%s`: not a directory", path))))
 	}
 
 	remove_error := os.remove(path)
 	if remove_error != nil {
-		items := make([dynamic]Value)
-		reserve(&items, 2)
-		append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`fs/remove-dir` failed for `%s`: %v", path, remove_error))))
-		return Value(cast(^Object)new_vector_object(items))
+		return value_err_vector(Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`fs/remove-dir` failed for `%s`: %v", path, remove_error))))
 	}
 
-	items := make([dynamic]Value)
-	reserve(&items, 2)
-	append(&items, Value(bool(true)), Value{})
-	return Value(cast(^Object)new_vector_object(items))
+	return value_err_vector(Value(bool(true)), Value{})
 }
 
 
@@ -2686,10 +2382,7 @@ native_fs_remove_dir :: proc(vm: ^VM, args: []Value) -> Value {
 
 // (read-all) [string nil]|[nil err]; Read all remaining stdin.
 native_io_read_all :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 0 {
-		runtime_error("`io/read-all` expects no arguments.\nusage: (io/read-all)")
-		return Value{}
-	}
+	if !require_arg_count(args, 0, "`io/read-all` expects no arguments.\nusage: (io/read-all)") { return Value{} }
 
 	data := make([dynamic]byte)
 	defer delete(data)
@@ -2705,26 +2398,17 @@ native_io_read_all :: proc(vm: ^VM, args: []Value) -> Value {
 			read_io_error, read_is_io_error := read_error.(io.Error)
 			read_general_error, read_is_general_error := read_error.(os.General_Error)
 			if (read_is_io_error && read_io_error == .EOF) || (read_is_general_error && read_general_error == .Broken_Pipe) {
-				items := make([dynamic]Value)
-				reserve(&items, 2)
-				append(&items, Value(cast(^Object)new_string_object(string(data[:]))), Value{})
-				return Value(cast(^Object)new_vector_object(items))
+				return value_err_vector(Value(cast(^Object)new_string_object(string(data[:]))), Value{})
 			}
 
-			items := make([dynamic]Value)
-			reserve(&items, 2)
-			append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`io/read-all` failed: %v", read_error))))
-			return Value(cast(^Object)new_vector_object(items))
+			return value_err_vector(Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`io/read-all` failed: %v", read_error))))
 		}
 	}
 }
 
 // (read-line) [string nil]|[nil nil]|[nil err]; Read one stdin line.
 native_io_read_line :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 0 {
-		runtime_error("`io/read-line` expects no arguments.\nusage: (io/read-line)")
-		return Value{}
-	}
+	if !require_arg_count(args, 0, "`io/read-line` expects no arguments.\nusage: (io/read-line)") { return Value{} }
 
 	line := make([dynamic]byte)
 	defer delete(line)
@@ -2738,10 +2422,7 @@ native_io_read_line :: proc(vm: ^VM, args: []Value) -> Value {
 					pop(&line)
 				}
 
-				items := make([dynamic]Value)
-				reserve(&items, 2)
-				append(&items, Value(cast(^Object)new_string_object(string(line[:]))), Value{})
-				return Value(cast(^Object)new_vector_object(items))
+				return value_err_vector(Value(cast(^Object)new_string_object(string(line[:]))), Value{})
 			}
 
 			append(&line, buffer[0])
@@ -2751,52 +2432,35 @@ native_io_read_line :: proc(vm: ^VM, args: []Value) -> Value {
 			read_io_error, read_is_io_error := read_error.(io.Error)
 			read_general_error, read_is_general_error := read_error.(os.General_Error)
 			if (read_is_io_error && read_io_error == .EOF) || (read_is_general_error && read_general_error == .Broken_Pipe) {
-				items := make([dynamic]Value)
-				reserve(&items, 2)
-
 				if len(line) == 0 {
-					append(&items, Value{}, Value{})
-					return Value(cast(^Object)new_vector_object(items))
+					return value_err_vector(Value{}, Value{})
 				}
 
 				if line[len(line) - 1] == '\r' {
 					pop(&line)
 				}
 
-				append(&items, Value(cast(^Object)new_string_object(string(line[:]))), Value{})
-				return Value(cast(^Object)new_vector_object(items))
+				return value_err_vector(Value(cast(^Object)new_string_object(string(line[:]))), Value{})
 			}
 
-			items := make([dynamic]Value)
-			reserve(&items, 2)
-			append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`io/read-line` failed: %v", read_error))))
-			return Value(cast(^Object)new_vector_object(items))
+			return value_err_vector(Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`io/read-line` failed: %v", read_error))))
 		}
 	}
 }
 
 // (write-err text) [true nil]|[nil err]; Write exact text to stderr.
 native_io_write_err :: proc(vm: ^VM, args: []Value) -> Value {
-	if len(args) != 1 {
-		runtime_error("`io/write-err` expects one argument.\nusage: (io/write-err text)")
-		return Value{}
-	}
+	if !require_arg_count(args, 1, "`io/write-err` expects one argument.\nusage: (io/write-err text)") { return Value{} }
 
 	text, text_ok := require_string_arg(args, 0, "io/write-err", "first")
 	if !text_ok { return Value{} }
 
 	_, write_error := os.write_string(os.stderr, text)
 	if write_error != nil {
-		items := make([dynamic]Value)
-		reserve(&items, 2)
-		append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`io/write-err` failed: %v", write_error))))
-		return Value(cast(^Object)new_vector_object(items))
+		return value_err_vector(Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`io/write-err` failed: %v", write_error))))
 	}
 
-	items := make([dynamic]Value)
-	reserve(&items, 2)
-	append(&items, Value(bool(true)), Value{})
-	return Value(cast(^Object)new_vector_object(items))
+	return value_err_vector(Value(bool(true)), Value{})
 }
 
 // (print-err value...) [true nil]|[nil err]; Print display text to stderr with newline.
@@ -2805,10 +2469,7 @@ native_io_print_err :: proc(vm: ^VM, args: []Value) -> Value {
 		if i > 0 {
 			_, space_error := os.write_string(os.stderr, " ")
 			if space_error != nil {
-				items := make([dynamic]Value)
-				reserve(&items, 2)
-				append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`io/print-err` failed: %v", space_error))))
-				return Value(cast(^Object)new_vector_object(items))
+				return value_err_vector(Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`io/print-err` failed: %v", space_error))))
 			}
 		}
 
@@ -2816,25 +2477,16 @@ native_io_print_err :: proc(vm: ^VM, args: []Value) -> Value {
 		_, write_error := os.write_string(os.stderr, text)
 		delete(text)
 		if write_error != nil {
-			items := make([dynamic]Value)
-			reserve(&items, 2)
-			append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`io/print-err` failed: %v", write_error))))
-			return Value(cast(^Object)new_vector_object(items))
+			return value_err_vector(Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`io/print-err` failed: %v", write_error))))
 		}
 	}
 
 	_, newline_error := os.write_string(os.stderr, "\n")
 	if newline_error != nil {
-		items := make([dynamic]Value)
-		reserve(&items, 2)
-		append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`io/print-err` failed: %v", newline_error))))
-		return Value(cast(^Object)new_vector_object(items))
+		return value_err_vector(Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`io/print-err` failed: %v", newline_error))))
 	}
 
-	items := make([dynamic]Value)
-	reserve(&items, 2)
-	append(&items, Value(bool(true)), Value{})
-	return Value(cast(^Object)new_vector_object(items))
+	return value_err_vector(Value(bool(true)), Value{})
 }
 
 

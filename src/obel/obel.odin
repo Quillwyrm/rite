@@ -1466,6 +1466,7 @@ load_module :: proc(importer_source_name, import_path: string) -> ^Module {
 		exports = nil,
 	})
 	module_index := len(vm.modules) - 1
+	// Import failure leaves this partial module behind; failed VM state is disposable.
 
 	source_bytes, read_error := os.read_entire_file(id, context.allocator)
 	if read_error != nil {
@@ -4443,6 +4444,7 @@ call_function_from_native :: proc(vm: ^VM, function: Value, args: []Value) -> Va
 
 	old_native_call_slot_top := vm.native_call_slot_top
 	vm.native_call_slot_top = new_native_call_slot_top
+	// Restore only on success; runtime errors leave the VM state disposable.
 
 	vm.slots[base] = function
 	for i := 0; i < len(args); i += 1 {
