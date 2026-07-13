@@ -155,7 +155,7 @@ disasm_append_code :: proc(parts: ^[dynamic]string, code: ^Code) {
 			inst := InstABx(word)
 			disasm_append_inst(parts, ip, "CLOSE_UPVALUES", fmt.tprintf("R%d", inst.a), "")
 
-		case .ADD, .SUB, .MUL, .DIV:
+		case .ADD, .SUB, .MUL, .DIV, .MIN, .MAX:
 			inst := InstABC(word)
 			op_name := "ADD"
 			if op == .SUB {
@@ -164,6 +164,10 @@ disasm_append_code :: proc(parts: ^[dynamic]string, code: ^Code) {
 				op_name = "MUL"
 			} else if op == .DIV {
 				op_name = "DIV"
+			} else if op == .MIN {
+				op_name = "MIN"
+			} else if op == .MAX {
+				op_name = "MAX"
 			}
 			disasm_append_inst(parts, ip, op_name, fmt.tprintf("R%d, R%d, %d", inst.a, inst.b, inst.c), "")
 
@@ -182,7 +186,7 @@ disasm_append_code :: proc(parts: ^[dynamic]string, code: ^Code) {
 			comment := disasm_value_text(code.constants[int(inst.c)])
 			disasm_append_inst(parts, ip, op_name, fmt.tprintf("R%d, R%d, C%d", inst.a, inst.b, inst.c), comment)
 
-		case .MOD, .EQUAL, .LESS, .LESS_EQUAL, .GREATER, .GREATER_EQUAL:
+		case .MOD, .EQUAL, .LESS, .LESS_EQUAL, .GREATER, .GREATER_EQUAL, .CLAMP:
 			inst := InstABC(word)
 			op_name := "MOD"
 			if op == .EQUAL {
@@ -195,12 +199,19 @@ disasm_append_code :: proc(parts: ^[dynamic]string, code: ^Code) {
 				op_name = "GREATER"
 			} else if op == .GREATER_EQUAL {
 				op_name = "GREATER_EQUAL"
+			} else if op == .CLAMP {
+				op_name = "CLAMP"
 			}
 			disasm_append_inst(parts, ip, op_name, fmt.tprintf("R%d, R%d, R%d", inst.a, inst.b, inst.c), "")
 
-		case .NOT, .LEN:
+		case .NOT, .LEN, .ABS:
 			inst := InstABC(word)
-			op_name := "NOT" if op == .NOT else "LEN"
+			op_name := "NOT"
+			if op == .LEN {
+				op_name = "LEN"
+			} else if op == .ABS {
+				op_name = "ABS"
+			}
 			disasm_append_inst(parts, ip, op_name, fmt.tprintf("R%d, R%d", inst.a, inst.b), "")
 
 		case .CALL:

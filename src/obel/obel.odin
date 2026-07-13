@@ -106,6 +106,8 @@ Opcode :: enum u8 {
 	SUB, // ABC: A=dst, B=first operand, C=operand count
 	MUL, // ABC: A=dst, B=first operand, C=operand count
 	DIV, // ABC: A=dst, B=first operand, C=operand count
+	MIN, // ABC: A=dst, B=first operand, C=operand count
+	MAX, // ABC: A=dst, B=first operand, C=operand count
 
 	ADD_CONST, // ABC: A=dst, B=lhs, C=constant index
 	SUB_CONST, // ABC: A=dst, B=lhs, C=constant index
@@ -121,6 +123,8 @@ Opcode :: enum u8 {
 	GREATER_EQUAL, // ABC: A=dst, B=lhs, C=rhs
 	NOT,           // ABC: A=dst, B=src
 	LEN,           // ABC: A=dst, B=src
+	ABS,           // ABC: A=dst, B=src
+	CLAMP,         // ABC: A=x/dst, B=lo, C=hi
 
 	CALL, // ABC: A=callee, B=argument count -> result replaces A; arguments start at A+1
 
@@ -194,7 +198,7 @@ Code :: struct {
 	has_rest_param:   bool,
 
 	upvalue_descs: []UpvalueDesc,
-	exports:       []LocalBinding,
+	exports:       []SlotBinding,
 }
 
 FunctionObject :: struct {
@@ -251,7 +255,7 @@ VM :: struct {
 	argv:       []string,
 	args_start: int,
 
-	// Current host-operation diagnostic; empty means no error.
+	// Current runtime diagnostic; empty means no error.
 	error_string: string,
 }
 
@@ -268,7 +272,7 @@ set_argv :: proc(vm: ^VM, argv: []string, args_start: int) {
 
 MAX_FRAME_SLOTS :: int(max(u8)) + 1
 
-LocalBinding :: struct {
+SlotBinding :: struct {
 	symbol:  ^SymbolObject,
 	slot:    int,
 	mutable: bool,
@@ -297,7 +301,7 @@ CodeBuilder :: struct {
 	fixed_param_count: int,
 	has_rest_param:   bool,
 
-	local_bindings: [MAX_FRAME_SLOTS]LocalBinding,
+	local_bindings: [MAX_FRAME_SLOTS]SlotBinding,
 	local_count:    int,
 
 	// Begins duplicate-definition checks for the current lexical scope.
@@ -310,8 +314,8 @@ CodeBuilder :: struct {
 	active_loops:       [dynamic]ActiveLoop,
 	break_jump_fixups:  [dynamic]int,
 
-	file_bindings: [dynamic]LocalBinding,
-	exports:       [dynamic]LocalBinding,
+	file_bindings: [dynamic]SlotBinding,
+	exports:       [dynamic]SlotBinding,
 
 	parent: ^CodeBuilder,
 }
@@ -1266,6 +1270,7 @@ append_value_text :: proc(parts: ^[dynamic]string, value: Value, parents: ^[dyna
 		append(parts, fmt.tprint(v))
 
 	case f64:
+		// TODO?: Consider Obel-specific display spelling for NaN and infinities.
 		text := fmt.tprintf("%.15g", v)
 		append(parts, text)
 
@@ -1450,9 +1455,9 @@ load_module :: proc(importer_source_name, import_path: string) -> ^Module {
 	if !os.exists(id) {
 		delete(id)
 
-		host_index, host_found := find_module(vm, import_path)
-		if host_found {
-			return &vm.modules[host_index]
+		native_index, native_found := find_module(vm, import_path)
+		if native_found {
+			return &vm.modules[native_index]
 		}
 
 		compile_error(fmt.tprintf("module `%s` not found.", import_path))
@@ -1540,8 +1545,8 @@ begin_code :: proc(parent: ^CodeBuilder, fixed_param_count: int, has_rest_param:
 		active_loops      = make([dynamic]ActiveLoop),
 		break_jump_fixups = make([dynamic]int),
 
-		file_bindings = make([dynamic]LocalBinding),
-		exports       = make([dynamic]LocalBinding),
+		file_bindings = make([dynamic]SlotBinding),
+		exports       = make([dynamic]SlotBinding),
 
 		parent = parent,
 	}
@@ -1560,7 +1565,7 @@ end_code :: proc(builder: ^CodeBuilder) -> ^Code {
 	upvalue_descs := make([]UpvalueDesc, len(builder.upvalue_descs))
 	copy(upvalue_descs, builder.upvalue_descs[:])
 
-	exports := make([]LocalBinding, len(builder.exports))
+	exports := make([]SlotBinding, len(builder.exports))
 	copy(exports, builder.exports[:])
 
 	delete(builder.bytecode)
@@ -1853,6 +1858,18 @@ emit_div :: proc(builder: ^CodeBuilder, dst, first_slot, count: int) {
 	emit_ABC(builder, .DIV, dst, first_slot, count)
 }
 
+emit_min :: proc(builder: ^CodeBuilder, dst, first_slot, count: int) {
+	assert(count >= 2 && count <= int(max(u8)), "MIN argument count does not fit u8")
+	record_slots(builder, dst, first_slot, first_slot + count - 1)
+	emit_ABC(builder, .MIN, dst, first_slot, count)
+}
+
+emit_max :: proc(builder: ^CodeBuilder, dst, first_slot, count: int) {
+	assert(count >= 2 && count <= int(max(u8)), "MAX argument count does not fit u8")
+	record_slots(builder, dst, first_slot, first_slot + count - 1)
+	emit_ABC(builder, .MAX, dst, first_slot, count)
+}
+
 emit_add_const :: proc(builder: ^CodeBuilder, dst, lhs, constant_index: int) {
 	assert(constant_index >= 0 && constant_index <= int(max(u8)), "ADD_CONST constant index does not fit u8")
 	record_slots(builder, dst, lhs)
@@ -1886,6 +1903,16 @@ emit_mod_const :: proc(builder: ^CodeBuilder, dst, lhs, constant_index: int) {
 emit_mod :: proc(builder: ^CodeBuilder, dst, lhs, rhs: int) {
 	record_slots(builder, dst, lhs, rhs)
 	emit_ABC(builder, .MOD, dst, lhs, rhs)
+}
+
+emit_abs :: proc(builder: ^CodeBuilder, dst, src: int) {
+	record_slots(builder, dst, src)
+	emit_ABC(builder, .ABS, dst, src, 0)
+}
+
+emit_clamp :: proc(builder: ^CodeBuilder, dst, lo, hi: int) {
+	record_slots(builder, dst, lo, hi)
+	emit_ABC(builder, .CLAMP, dst, lo, hi)
 }
 
 emit_equal :: proc(builder: ^CodeBuilder, dst, lhs, rhs: int) {
@@ -2170,14 +2197,14 @@ reserve_slots_until :: proc(builder: ^CodeBuilder, slot_after_last: int) {
 }
 
 // Searches visible bindings from newest to oldest.
-find_local :: proc(builder: ^CodeBuilder, symbol: ^SymbolObject) -> (LocalBinding, bool) {
+find_local :: proc(builder: ^CodeBuilder, symbol: ^SymbolObject) -> (SlotBinding, bool) {
 	for i := builder.local_count - 1; i >= 0; i -= 1 {
 		if builder.local_bindings[i].symbol == symbol {
 			return builder.local_bindings[i], true
 		}
 	}
 
-	return LocalBinding{}, false
+	return SlotBinding{}, false
 }
 
 symbol_is_reserved_word :: proc(symbol: ^SymbolObject) -> bool {
@@ -2577,7 +2604,7 @@ validate_binding_target :: proc(builder: ^CodeBuilder, target: Value, introduced
 	}
 }
 
-reserve_binding_target_slots :: proc(builder: ^CodeBuilder, target: Value, mutable: bool, bindings: []LocalBinding, binding_count: ^int) {
+reserve_binding_target_slots :: proc(builder: ^CodeBuilder, target: Value, mutable: bool, bindings: []SlotBinding, binding_count: ^int) {
 	target_object := target.(^Object)
 
 	switch target_object.kind {
@@ -2590,7 +2617,7 @@ reserve_binding_target_slots :: proc(builder: ^CodeBuilder, target: Value, mutab
 		slot := claim_slot(builder)
 		if Compiler.failed { return }
 
-		bindings[binding_count^] = LocalBinding{
+		bindings[binding_count^] = SlotBinding{
 			symbol  = cast(^SymbolObject)target_object,
 			slot    = slot,
 			mutable = mutable,
@@ -2617,7 +2644,7 @@ reserve_binding_target_slots :: proc(builder: ^CodeBuilder, target: Value, mutab
 	}
 }
 
-publish_bindings :: proc(builder: ^CodeBuilder, bindings: []LocalBinding, binding_count: int) {
+publish_bindings :: proc(builder: ^CodeBuilder, bindings: []SlotBinding, binding_count: int) {
 	for i := 0; i < binding_count; i += 1 {
 		binding := bindings[i]
 
@@ -2629,7 +2656,7 @@ publish_bindings :: proc(builder: ^CodeBuilder, bindings: []LocalBinding, bindin
 // Initializes already-published target bindings from source_slot.
 // This must not create or publish bindings.
 // Target forms evaluate no user expressions; map keys are compile-time values.
-init_binding_target :: proc(builder: ^CodeBuilder, target: Value, source_slot: int, bindings: []LocalBinding, binding_count: int) {
+init_binding_target :: proc(builder: ^CodeBuilder, target: Value, source_slot: int, bindings: []SlotBinding, binding_count: int) {
 	target_object := target.(^Object)
 
 	switch target_object.kind {
@@ -2750,7 +2777,7 @@ compile_def_or_var :: proc(builder: ^CodeBuilder, form: Value, mutable: bool) {
 		if Compiler.failed { return }
 
 		// Recursive named binding: publish the name before compiling the body.
-		binding := LocalBinding{
+		binding := SlotBinding{
 			symbol  = name,
 			slot    = binding_slot,
 			mutable = mutable,
@@ -2768,7 +2795,7 @@ compile_def_or_var :: proc(builder: ^CodeBuilder, form: Value, mutable: bool) {
 
 		for i := 0; i < param_slot_count; i += 1 {
 			param := params[i]
-			child.local_bindings[child.local_count] = LocalBinding{
+			child.local_bindings[child.local_count] = SlotBinding{
 				symbol  = param,
 				slot    = i,
 				mutable = true,
@@ -2820,7 +2847,7 @@ compile_def_or_var :: proc(builder: ^CodeBuilder, form: Value, mutable: bool) {
 		validate_binding_target(builder, target, introduced_symbols[:], &introduced_symbol_count)
 		if Compiler.failed { return }
 
-		target_bindings: [MAX_FRAME_SLOTS]LocalBinding
+		target_bindings: [MAX_FRAME_SLOTS]SlotBinding
 		target_binding_count := 0
 
 		reserve_binding_target_slots(builder, target, mutable, target_bindings[:], &target_binding_count)
@@ -2923,7 +2950,7 @@ compile_import :: proc(builder: ^CodeBuilder, list: ^ListObject, importer_source
 		compile_constant(builder, export.value, binding_slot)
 		if Compiler.failed { return }
 
-		builder.local_bindings[builder.local_count] = LocalBinding{
+		builder.local_bindings[builder.local_count] = SlotBinding{
 			symbol  = qualified_symbol,
 			slot    = binding_slot,
 			mutable = export.mutable,
@@ -3497,7 +3524,7 @@ compile_each :: proc(builder: ^CodeBuilder, list: ^ListObject, dst: int) {
 	reserve_slots_until(builder, state_base + EACH_STATE_SLOT_COUNT)
 	if Compiler.failed { return }
 
-	target_bindings: [MAX_FRAME_SLOTS]LocalBinding
+	target_bindings: [MAX_FRAME_SLOTS]SlotBinding
 	target_binding_count := 0
 
 	reserve_binding_target_slots(builder, target, false, target_bindings[:], &target_binding_count)
@@ -3881,6 +3908,33 @@ compile_builtin_fast_path :: proc(builder: ^CodeBuilder, symbol: ^SymbolObject, 
 		return
 	}
 
+	if symbol.text == "min" ||
+	   symbol.text == "max" {
+		operand_count := len(args)
+		assert(operand_count >= 2, "min/max fast path expects at least two operands")
+
+		if operand_count > int(max(u8)) {
+			compile_error("min/max call has too many arguments.")
+			return
+		}
+
+		operand_base := builder.next_slot
+		reserve_slots_until(builder, operand_base + operand_count)
+		if Compiler.failed { return }
+
+		for i := 0; i < operand_count; i += 1 {
+			compile_expr(builder, args[i], operand_base + i)
+			if Compiler.failed { return }
+		}
+
+		if symbol.text == "min" {
+			emit_min(builder, dst, operand_base, operand_count)
+		} else {
+			emit_max(builder, dst, operand_base, operand_count)
+		}
+		return
+	}
+
 	if symbol.text == "%" ||
 	   symbol.text == "=" ||
 	   symbol.text == "!=" ||
@@ -3950,6 +4004,32 @@ compile_builtin_fast_path :: proc(builder: ^CodeBuilder, symbol: ^SymbolObject, 
 		return
 	}
 
+	if symbol.text == "abs" {
+		compile_expr(builder, args[0], dst)
+		if Compiler.failed { return }
+
+		emit_abs(builder, dst, dst)
+		return
+	}
+
+	if symbol.text == "clamp" {
+		operand_count := len(args)
+		assert(operand_count == 3, "clamp fast path expects three operands")
+
+		operand_base := builder.next_slot
+		reserve_slots_until(builder, operand_base + operand_count)
+		if Compiler.failed { return }
+
+		for i := 0; i < operand_count; i += 1 {
+			compile_expr(builder, args[i], operand_base + i)
+			if Compiler.failed { return }
+		}
+
+		emit_clamp(builder, operand_base, operand_base + 1, operand_base + 2)
+		emit_move(builder, dst, operand_base)
+		return
+	}
+
 	if symbol.text == "push" {
 		if len(args) > int(max(u8)) {
 			compile_error("`push` has too many arguments.")
@@ -4014,7 +4094,7 @@ compile_fn :: proc(parent: ^CodeBuilder, list: ^ListObject, dst: int) {
 
 	for i := 0; i < param_slot_count; i += 1 {
 		param := param_symbols[i]
-		child.local_bindings[child.local_count] = LocalBinding{
+		child.local_bindings[child.local_count] = SlotBinding{
 			symbol  = param,
 			slot    = i,
 			mutable = true,
@@ -4221,6 +4301,13 @@ compile_list_expr :: proc(builder: ^CodeBuilder, list: ^ListObject, dst: int) {
 			return
 		}
 
+		if (head.text == "abs" && argument_count == 1) ||
+		   ((head.text == "min" || head.text == "max") && argument_count >= 2) ||
+		   (head.text == "clamp" && argument_count == 3) {
+			compile_builtin_fast_path(builder, head, list.items[1:], dst)
+			return
+		}
+
 		if (head.text == "push" && argument_count >= 2) ||
 		   (head.text == "pop" && argument_count == 1) {
 			compile_builtin_fast_path(builder, head, list.items[1:], dst)
@@ -4394,14 +4481,11 @@ start_function_call :: proc(vm: ^VM, base, argument_count: int) -> (result: Valu
 				rest_count = 0
 			}
 
-			items := make([dynamic]Value)
-			if rest_count > 0 {
-				reserve(&items, rest_count)
-			}
+			items := make([dynamic]Value, rest_count)
 
 			// Copy extras before replacing the first extra argument slot with the rest vector.
 			for i := 0; i < rest_count; i += 1 {
-				append(&items, vm.slots[callee_slot_base + fixed_count + i])
+				items[i] = vm.slots[callee_slot_base + fixed_count + i]
 			}
 
 			vm.slots[callee_slot_base + fixed_count] = Value(cast(^Object)new_vector_object(items))
@@ -4681,6 +4765,26 @@ run_vm :: proc(vm: ^VM) -> Value {
 			if vm.error_string != "" { return Value{} }
 			vm.slots[dst] = result
 
+		case .MIN:
+			inst := InstABC(word)
+			dst := slot_base + int(inst.a)
+			first_slot := slot_base + int(inst.b)
+			operand_count := int(inst.c)
+
+			result := op_min(vm.slots[first_slot:first_slot + operand_count])
+			if vm.error_string != "" { return Value{} }
+			vm.slots[dst] = result
+
+		case .MAX:
+			inst := InstABC(word)
+			dst := slot_base + int(inst.a)
+			first_slot := slot_base + int(inst.b)
+			operand_count := int(inst.c)
+
+			result := op_max(vm.slots[first_slot:first_slot + operand_count])
+			if vm.error_string != "" { return Value{} }
+			vm.slots[dst] = result
+
 		// Constant-pool opcodes cover common local-update and binary constant lowering.
 		case .ADD_CONST:
 			inst := InstABC(word)
@@ -4817,6 +4921,17 @@ run_vm :: proc(vm: ^VM) -> Value {
 			if vm.error_string != "" { return Value{} }
 			vm.slots[dst] = result
 
+		case .CLAMP:
+			inst := InstABC(word)
+			dst := slot_base + int(inst.a)
+			x := vm.slots[dst]
+			lo := vm.slots[slot_base + int(inst.b)]
+			hi := vm.slots[slot_base + int(inst.c)]
+
+			result := op_clamp(x, lo, hi)
+			if vm.error_string != "" { return Value{} }
+			vm.slots[dst] = result
+
 		case .EQUAL:
 			inst := InstABC(word)
 			dst := slot_base + int(inst.a)
@@ -4860,8 +4975,8 @@ run_vm :: proc(vm: ^VM) -> Value {
 			if vm.error_string != "" { return Value{} }
 			vm.slots[dst] = Value(bool(condition))
 
-		case .NOT, .LEN:
-			// These unary operations share A=dst, B=src; LEN may fail.
+		case .NOT, .LEN, .ABS:
+			// These unary operations share A=dst, B=src; LEN and ABS may fail.
 			inst := InstABC(word)
 			dst := slot_base + int(inst.a)
 			src := vm.slots[slot_base + int(inst.b)]
@@ -4872,6 +4987,8 @@ run_vm :: proc(vm: ^VM) -> Value {
 				result = op_not(src)
 			case .LEN:
 				result = op_len(src)
+			case .ABS:
+				result = op_abs(src)
 			}
 
 			if vm.error_string != "" { return Value{} }
@@ -5340,7 +5457,7 @@ run_code :: proc(code: ^Code) -> Value {
 }
 
 
-// Host operations ===============================================================================
+// Runtime entry operations =======================================================================
 
 run_source :: proc(source, source_name: string) -> Value {
 	forms := read_source(source)
